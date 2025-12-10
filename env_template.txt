@@ -1,0 +1,25 @@
+# Copy this file to .env and fill in your values
+
+# Telegram Bot Configuration
+BOT_TOKEN=your_telegram_bot_token_here
+
+# Supabase Configuration
+SUPABASE_URL=your_supabase_project_url
+SUPABASE_KEY=your_supabase_anon_key
+
+# Admin Telegram User IDs (comma-separated, no spaces)
+ADMIN_IDS=11111111,22222222,33333333,44444444,55555555
+
+# Zarinpal Payment Gateway (base URL - used for all plans if individual URLs not set)
+ZARINPAL_URL=https://zarinp.al/itcampiran.ir
+
+# Zarinpal Payment URLs (for each plan - optional, defaults to ZARINPAL_URL above)
+ZARINPAL_URL_ECONOMY=https://zarinp.al/itcampiran.ir
+ZARINPAL_URL_STANDARD=https://zarinp.al/itcampiran.ir
+ZARINPAL_URL_PROFESSIONAL=https://zarinp.al/itcampiran.ir
+
+# Bank Account Information (for manual transfers)
+BANK_NAME=بانک ملت
+BANK_ACCOUNT=XXXX-XXXX-XXXX-XXXX
+ACCOUNT_HOLDER=نام صاحب حساب
+
