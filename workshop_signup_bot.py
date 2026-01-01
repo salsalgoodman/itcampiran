@@ -527,12 +527,20 @@ async def send_lesson(update_or_bot, chat_id: int, lesson_number: int, context=N
         
         exam_prompt = f"✅ درس {lesson_number} ارسال شد!\n\n📝 برای شروع آزمون، دکمه زیر را بزنید:"
         
+        # Always send as new message, never edit
+        bot = context.bot if hasattr(context, 'bot') else None
         if isinstance(update_or_bot, Update):
             await update_or_bot.message.reply_text(exam_prompt, reply_markup=exam_reply_markup)
+        elif bot:
+            await bot.send_message(chat_id=chat_id, text=exam_prompt, reply_markup=exam_reply_markup)
         elif hasattr(update_or_bot, 'send_message'):
             await update_or_bot.send_message(chat_id=chat_id, text=exam_prompt, reply_markup=exam_reply_markup)
         else:
-            await update_or_bot.edit_message_text(exam_prompt, reply_markup=exam_reply_markup)
+            # Fallback: try to send new message instead of edit
+            if bot:
+                await bot.send_message(chat_id=chat_id, text=exam_prompt, reply_markup=exam_reply_markup)
+            else:
+                logger.error("Cannot send exam prompt - no bot instance available")
         
     except Exception as e:
         logger.error(f"Error sending lesson {lesson_number}: {e}", exc_info=True)
@@ -700,9 +708,11 @@ async def handle_exam_answer_callback(update: Update, context: ContextTypes.DEFA
                 return
             
             # Start exam - pass context explicitly
-            await query.edit_message_text("⏳ در حال شروع آزمون...")
-            # Use bot from context to send messages
+            # Answer callback first
+            await query.answer("⏳ در حال شروع آزمون...")
+            # Send new message instead of editing
             bot = context.bot
+            await bot.send_message(chat_id=query.from_user.id, text="⏳ در حال شروع آزمون...")
             await start_lesson_exam(bot, query.from_user.id, lesson_data["id"], lesson_number, context)
             return
         
@@ -734,9 +744,14 @@ async def handle_exam_answer_callback(update: Update, context: ContextTypes.DEFA
             question_index = int(query.data.split("_")[-1])
             context.user_data["exam_current_question"] = question_index + 1
             
+            await query.answer()
             questions = context.user_data.get("exam_questions", [])
+            bot = context.bot if hasattr(context, 'bot') else None
             if context.user_data["exam_current_question"] < len(questions):
-                await send_exam_question(query, query.from_user.id, context, context.user_data["exam_current_question"])
+                if bot:
+                    await send_exam_question(bot, query.from_user.id, context, context.user_data["exam_current_question"])
+                else:
+                    await send_exam_question(query, query.from_user.id, context, context.user_data["exam_current_question"])
             else:
                 await finish_exam(query, context)
             return
@@ -922,8 +937,11 @@ async def handle_lesson_selection(update: Update, context: ContextTypes.DEFAULT_
             return
         
         # Send lesson - pass context to send_lesson
-        await query.edit_message_text("⏳ در حال بارگذاری درس...", parse_mode='Markdown')
-        await send_lesson(query, user_id, lesson_number, context)
+        # Don't edit the menu message, send lesson as new message
+        await query.answer("⏳ در حال بارگذاری درس...")
+        bot = context.bot
+        await bot.send_message(chat_id=user_id, text="⏳ در حال بارگذاری درس...")
+        await send_lesson(bot, user_id, lesson_number, context)
         
     except Exception as e:
         logger.error(f"Error handling lesson selection: {e}", exc_info=True)
