@@ -1,21 +1,23 @@
 # -*- coding: utf-8 -*-
 """
-Telegram Bot for Workshop Registration
-Handles user registration with online and offline payment methods
+Telegram Bot for Python Learning
+15 lessons from basics to building a Telegram bot
+All lessons are FREE - no payment required
 """
 
 import os
 import io
 import json
 import logging
-from datetime import datetime
+import asyncio
+from datetime import datetime, timezone
 from functools import wraps
 from typing import List, Optional
 
 import jdatetime
 from dotenv import load_dotenv
 from supabase import create_client, Client
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, Bot
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -25,6 +27,13 @@ from telegram.ext import (
     ContextTypes,
     filters
 )
+
+# Import new lessons content
+try:
+    from lessons_content_new import get_all_lessons, get_lesson_by_number
+except ImportError:
+    # Fallback to old content if new doesn't exist
+    from lessons_content import get_all_lessons, get_lesson_by_number
 
 # Load environment variables
 load_dotenv()
@@ -41,51 +50,28 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 
-# Admin IDs (comma-separated string to list)
+# Initialize Supabase client
+supabase: Optional[Client] = None
+if SUPABASE_URL and SUPABASE_KEY:
+    try:
+        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+        logger.info("Supabase client initialized successfully")
+    except Exception as e:
+        logger.error(f"Error initializing Supabase client: {e}")
+        supabase = None
+else:
+    logger.warning("Supabase credentials not found, client not initialized")
+
+# Admin IDs
 ADMIN_IDS_STR = os.environ.get("ADMIN_IDS", "")
 ADMIN_IDS = [int(admin_id.strip()) for admin_id in ADMIN_IDS_STR.split(",") if admin_id.strip()]
 
-# Zarinpal Payment Gateway
-ZARINPAL_BASE_URL = os.environ.get("ZARINPAL_URL", "https://zarinp.al/itcampiran.ir")
-
-# Zarinpal URLs for each plan (can use same URL or different)
-ZARINPAL_URLS = {
-    "plan_economy": os.environ.get("ZARINPAL_URL_ECONOMY", ZARINPAL_BASE_URL),
-    "plan_standard": os.environ.get("ZARINPAL_URL_STANDARD", ZARINPAL_BASE_URL),
-    "plan_professional": os.environ.get("ZARINPAL_URL_PROFESSIONAL", ZARINPAL_BASE_URL),
-}
-
-# Bank account info
-BANK_NAME = os.environ.get("BANK_NAME", "بانک ملت")
-BANK_ACCOUNT = os.environ.get("BANK_ACCOUNT", "")
-ACCOUNT_HOLDER = os.environ.get("ACCOUNT_HOLDER", "")
-
-# Plan information
-PLANS = {
-    "plan_economy": {
-        "name": "اقتصادی",
-        "price": "۱٬۸۰۰٬۰۰۰",
-        "price_num": 1800000
-    },
-    "plan_standard": {
-        "name": "استاندارد",
-        "price": "۲٬۵۰۰٬۰۰۰",
-        "price_num": 2500000
-    },
-    "plan_professional": {
-        "name": "حرفه‌ای",
-        "price": "۵٬۸۰۰٬۰۰۰",
-        "price_num": 5800000
-    }
-}
-
-# Initialize Supabase client
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+# Total lessons: 15 (all free)
+TOTAL_LESSONS = 15
 
 # Conversation states
-SELECTING_PLAN, SELECTING_PAYMENT, WAITING_RECEIPT, WAITING_NAME, WAITING_PHONE = range(5)
-WAITING_ANSWER = 10  # For answering questions
-
+WAITING_NAME, WAITING_PHONE, WAITING_PYTHON_STATUS = range(3)
+WAITING_EXAM_ANSWER = 10  # For answering exam questions
 
 # Admin restriction decorator
 def restricted(func):
@@ -99,9 +85,11 @@ def restricted(func):
         return await func(update, context, *args, **kwargs)
     return wrapper
 
-
 def check_existing_registration(telegram_id: int) -> dict:
     """Check if user already has a registration"""
+    if not supabase:
+        logger.error("Supabase client not initialized")
+        return None
     try:
         result = supabase.table("users").select("id,status").eq("telegram_id", telegram_id).execute()
         if result.data:
@@ -111,914 +99,981 @@ def check_existing_registration(telegram_id: int) -> dict:
         logger.error(f"Error checking existing registration: {e}")
         return None
 
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handle /start command - show welcome and plan selection"""
-    user_id = update.effective_user.id
-    
-    # Check for existing registration
-    existing = check_existing_registration(user_id)
-    if existing:
-        status = existing.get("status", "")
-        if status == "confirmed":
-            await update.message.reply_text(
-                "✅ شما قبلاً ثبت‌نام کرده‌اید و ثبت‌نام شما تأیید شده است.\n"
-                "منتظر پیام‌های بعدی ما باشید."
-            )
-            return ConversationHandler.END
-        elif status == "pending":
-            await update.message.reply_text(
-                "⏳ شما قبلاً ثبت‌نام کرده‌اید و در انتظار تأیید هستید.\n"
-                "به محض تأیید، به شما اطلاع داده خواهد شد."
-            )
-            return ConversationHandler.END
-    
-    # Welcome message with plan selection
-    welcome_text = (
-        "سلام! 👋\n"
-        "به ورکشاپ آموزشی ما خوش آمدید.\n\n"
-        "لطفاً یکی از پلن‌های زیر را انتخاب کنید:"
-    )
-    
-    keyboard = [
-        [
-            InlineKeyboardButton(
-                f"اقتصادی – {PLANS['plan_economy']['price']} تومان",
-                callback_data="plan_economy"
-            ),
-            InlineKeyboardButton(
-                f"استاندارد – {PLANS['plan_standard']['price']} تومان",
-                callback_data="plan_standard"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                f"حرفه‌ای – {PLANS['plan_professional']['price']} تومان",
-                callback_data="plan_professional"
-            )
-        ]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text(welcome_text, reply_markup=reply_markup)
-    return SELECTING_PLAN
-
-
-async def on_plan_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handle plan selection callback"""
-    query = update.callback_query
-    await query.answer()
-    
-    plan_choice = query.data
-    plan_info = PLANS.get(plan_choice)
-    
-    if not plan_info:
-        await query.edit_message_text("❌ خطا در انتخاب پلن. لطفاً دوباره تلاش کنید.")
-        return ConversationHandler.END
-    
-    # Store selected plan
-    context.user_data["plan"] = plan_choice
-    
-    # Confirmation message with payment method selection
-    confirm_text = (
-        f"✅ شما پلن *{plan_info['name']}* با قیمت *{plan_info['price']} تومان* را انتخاب کردید.\n\n"
-        "لطفاً شیوه پرداخت را انتخاب کنید:"
-    )
-    
-    buttons = [
-        [InlineKeyboardButton("💳 پرداخت آنلاین", callback_data="pay_online")],
-        [InlineKeyboardButton("🏧 کارت‌به‌کارت", callback_data="pay_offline")]
-    ]
-    
-    await query.edit_message_text(
-        confirm_text,
-        reply_markup=InlineKeyboardMarkup(buttons),
-        parse_mode='Markdown'
-    )
-    return SELECTING_PAYMENT
-
-
-async def on_payment_method(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handle payment method selection"""
-    query = update.callback_query
-    await query.answer()
-    
-    payment_method = query.data
-    plan_choice = context.user_data.get("plan")
-    plan_info = PLANS.get(plan_choice)
-    
-    if payment_method == "pay_online":
-        # Online payment flow
-        zarinpal_url = ZARINPAL_URLS.get(plan_choice, "")
-        
-        if not zarinpal_url:
-            await query.edit_message_text(
-                "❌ خطا: لینک پرداخت تنظیم نشده است. لطفاً با پشتیبانی تماس بگیرید."
-            )
-            return ConversationHandler.END
-        
-        pay_btn = InlineKeyboardButton("⭐ پرداخت از طریق زرین‌پال", url=zarinpal_url)
-        
-        await query.edit_message_text(
-            f"💳 پرداخت آنلاین\n\n"
-            f"مبلغ: *{plan_info['price']} تومان*\n\n"
-            "لطفاً از طریق دکمه زیر پرداخت را انجام دهید و سپس نام و شماره تماس خود را وارد کنید:",
-            reply_markup=InlineKeyboardMarkup([[pay_btn]]),
-            parse_mode='Markdown'
-        )
-        
-        await query.message.reply_text("لطفاً نام و نام خانوادگی خود را وارد کنید:")
-        return WAITING_NAME
-    
-    elif payment_method == "pay_offline":
-        # Manual bank transfer flow
-        bank_info_text = (
-            f"🏧 اطلاعات پرداخت کارت به کارت:\n\n"
-            f"*{BANK_NAME}*\n"
-            f"شماره کارت: `{BANK_ACCOUNT}`\n"
-            f"نام صاحب حساب: {ACCOUNT_HOLDER}\n\n"
-            f"مبلغ: *{plan_info['price']} تومان*\n\n"
-            "پس از واریز، لطفاً عکس رسید پرداخت را اینجا ارسال کنید. 📸"
-        )
-        
-        await query.edit_message_text(
-            bank_info_text,
-            parse_mode='Markdown'
-        )
-        return WAITING_RECEIPT
-    
-    return ConversationHandler.END
-
-
-async def handle_receipt_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handle receipt photo upload for manual payment"""
-    user_id = update.effective_user.id
-    plan_choice = context.user_data.get("plan")
-    
-    if not plan_choice:
-        await update.message.reply_text("❌ خطا: پلن انتخاب نشده است. لطفاً از /start شروع کنید.")
-        return ConversationHandler.END
-    
+    """Handle /start command"""
     try:
-        # Get the highest resolution photo
-        photo = update.message.photo[-1]
-        file = await photo.get_file()
-        photo_bytes = await file.download_as_bytearray()
+        user_id = update.effective_user.id
+        username = update.effective_user.username or "Unknown"
+        logger.info(f"Received /start from user {user_id} (@{username})")
         
-        # Upload to Supabase Storage
-        timestamp = int(datetime.utcnow().timestamp())
-        file_path = f"receipts/{user_id}_{timestamp}.jpg"
+        message = update.effective_message
+        if not message:
+            logger.error("No effective message found in update")
+            return ConversationHandler.END
         
-        # Upload image (using itcamptel bucket)
-        supabase.storage.from_("itcamptel").upload(
-            file_path,
-            io.BytesIO(photo_bytes),
-            file_options={"content-type": "image/jpeg", "cache-control": "3600"}
+        # Check for existing registration
+        existing = check_existing_registration(user_id)
+        if existing:
+            status = existing.get("status", "")
+            if status == "confirmed":
+                # User already registered, show lessons menu
+                await show_lessons_menu(update, context)
+                return ConversationHandler.END
+        
+        # Welcome message
+        welcome_text = (
+            "🎓 **به دوره آموزش پایتون خوش آمدید!**\n\n"
+            "در این دوره شما یاد می‌گیرید:\n"
+            "✅ مبانی پایتون\n"
+            "✅ ساختارهای داده\n"
+            "✅ برنامه‌نویسی پیشرفته\n"
+            "✅ ساخت ربات تلگرام\n\n"
+            "**همه درس‌ها رایگان هستند!** 🎉\n\n"
+            "لطفاً نام خود را وارد کنید:"
         )
         
-        # Get public URL (get_public_url returns a string URL)
-        receipt_url = supabase.storage.from_("itcamptel").get_public_url(file_path)
-        
-        # Store receipt URL temporarily
-        context.user_data["receipt_url"] = receipt_url
-        context.user_data["receipt_file_path"] = file_path
-        
-        await update.message.reply_text(
-            "✅ رسید دریافت شد!\n\n"
-            "لطفاً نام و نام خانوادگی خود را وارد کنید:"
-        )
+        await message.reply_text(welcome_text, parse_mode='Markdown')
         return WAITING_NAME
         
     except Exception as e:
-        logger.error(f"Error handling receipt photo: {e}")
-        await update.message.reply_text(
-            "❌ خطا در آپلود تصویر. لطفاً دوباره تلاش کنید."
-        )
-        return WAITING_RECEIPT
-
+        logger.error(f"Error in start: {e}", exc_info=True)
+        if update.effective_message:
+            await update.effective_message.reply_text("❌ خطایی رخ داد. لطفاً دوباره تلاش کنید.")
+        return ConversationHandler.END
 
 async def handle_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handle user name input"""
-    user_name = update.message.text.strip()
-    
-    if not user_name or len(user_name) < 2:
-        await update.message.reply_text("❌ نام وارد شده معتبر نیست. لطفاً نام کامل خود را وارد کنید:")
+    try:
+        name = update.message.text.strip()
+        if len(name) < 2:
+            await update.message.reply_text("❌ نام باید حداقل 2 کاراکتر باشد. لطفاً دوباره وارد کنید:")
+            return WAITING_NAME
+        
+        context.user_data["name"] = name
+        
+        # Request phone number
+        keyboard = [[KeyboardButton("📱 اشتراک‌گذاری شماره", request_contact=True)]]
+        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
+        
+        await update.message.reply_text(
+            f"خوب {name}! حالا لطفاً شماره موبایل خود را وارد کنید یا دکمه زیر را بزنید:",
+            reply_markup=reply_markup
+        )
+        return WAITING_PHONE
+        
+    except Exception as e:
+        logger.error(f"Error in handle_name: {e}")
+        await update.message.reply_text("❌ خطایی رخ داد. لطفاً دوباره تلاش کنید.")
         return WAITING_NAME
-    
-    context.user_data["name"] = user_name
-    
-    # Create contact sharing keyboard
-    contact_keyboard = ReplyKeyboardMarkup(
-        [[KeyboardButton("📱 اشتراک‌گذاری شماره", request_contact=True)]],
-        resize_keyboard=True,
-        one_time_keyboard=True
-    )
-    
-    await update.message.reply_text(
-        "شماره موبایل خود را هم ارسال کنید:",
-        reply_markup=contact_keyboard
-    )
-    return WAITING_PHONE
-
 
 async def handle_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handle user phone input"""
-    user_phone = None
-    
-    # Check if contact was shared
-    if update.message.contact:
-        user_phone = update.message.contact.phone_number
-    else:
-        user_phone = update.message.text.strip()
-    
-    # Basic validation (Iranian phone numbers)
-    if not user_phone:
-        await update.message.reply_text("❌ شماره تماس وارد نشده است. لطفاً شماره خود را وارد کنید:")
-        return WAITING_PHONE
-    
-    # Remove non-digit characters for validation
-    phone_digits = ''.join(filter(str.isdigit, user_phone))
-    if len(phone_digits) < 10:
-        await update.message.reply_text("❌ شماره تماس معتبر نیست. لطفاً شماره صحیح را وارد کنید:")
-        return WAITING_PHONE
-    
-    context.user_data["phone"] = user_phone
-    
-    # Determine payment method and finish registration
-    payment_method = "online" if "receipt_url" not in context.user_data else "offline"
-    
-    if payment_method == "online":
-        return await finish_registration_online(update, context)
-    else:
-        return await finish_registration_offline(update, context)
-
-
-async def finish_registration_online(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Complete online payment registration"""
-    user_id = update.effective_user.id
-    plan_choice = context.user_data.get("plan")
-    user_name = context.user_data.get("name")
-    user_phone = context.user_data.get("phone")
-    
+    """Handle phone number input"""
     try:
-        # Insert user record
-        plan_name_fa = PLANS[plan_choice]["name"]
+        user_id = update.effective_user.id
+        phone = None
         
-        user_data = {
-            "telegram_id": user_id,
-            "name": user_name,
-            "phone": user_phone,
-            "plan": plan_name_fa,
-            "payment_method": "online",
-            "timestamp": datetime.utcnow().isoformat(),
-            "status": "confirmed"
-        }
-        
-        result = supabase.table("users").insert(user_data).execute()
-        registration_id = result.data[0]["id"]
-        
-        # Generate tracking code
-        tracking_code = f"W{registration_id:05d}"
-        
-        # Convert to Persian date
-        persian_date = jdatetime.datetime.fromgregorian(
-            datetime=datetime.utcnow(),
-            locale=jdatetime.FA_LOCALE
-        )
-        date_str = persian_date.strftime("%d %B %Y - %H:%M")
-        
-        confirmation_text = (
-            f"🎉 ثبت‌نام شما با موفقیت انجام شد!\n\n"
-            f"*کد پیگیری:* `{tracking_code}`\n"
-            f"*تاریخ ثبت‌نام:* {date_str}\n\n"
-            f"منتظر پیام‌های بعدی ما باشید."
-        )
-        
-        await update.message.reply_text(
-            confirmation_text,
-            parse_mode='Markdown',
-            reply_markup=None  # Remove keyboard
-        )
-        
-        # Start learning path
-        await start_learning_path(update, context, user_id)
-        
-        # Clear user data
-        context.user_data.clear()
-        return ConversationHandler.END
-        
-    except Exception as e:
-        logger.error(f"Error finishing online registration: {e}")
-        await update.message.reply_text(
-            "❌ خطا در ثبت اطلاعات. لطفاً دوباره تلاش کنید یا با پشتیبانی تماس بگیرید."
-        )
-        return ConversationHandler.END
-
-
-async def finish_registration_offline(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Complete offline payment registration and notify admins"""
-    user_id = update.effective_user.id
-    plan_choice = context.user_data.get("plan")
-    user_name = context.user_data.get("name")
-    user_phone = context.user_data.get("phone")
-    receipt_url = context.user_data.get("receipt_url")
-    
-    try:
-        plan_name_fa = PLANS[plan_choice]["name"]
-        
-        # Insert user record
-        user_data = {
-            "telegram_id": user_id,
-            "name": user_name,
-            "phone": user_phone,
-            "plan": plan_name_fa,
-            "payment_method": "offline",
-            "timestamp": datetime.utcnow().isoformat(),
-            "status": "pending"
-        }
-        
-        user_result = supabase.table("users").insert(user_data).execute()
-        new_user_id = user_result.data[0]["id"]
-        
-        # Insert receipt record
-        receipt_data = {
-            "user_id": new_user_id,
-            "image_url": receipt_url,
-            "status": "pending",
-            "admin_id": None
-        }
-        
-        supabase.table("receipts").insert(receipt_data).execute()
-        
-        # Notify all admins
-        for admin_id in ADMIN_IDS:
-            try:
-                approve_btn = InlineKeyboardButton(
-                    "✅ تأیید",
-                    callback_data=f"approve_{new_user_id}"
-                )
-                reject_btn = InlineKeyboardButton(
-                    "❌ رد کردن",
-                    callback_data=f"reject_{new_user_id}"
-                )
-                
-                admin_message = (
-                    f"📥 *ثبت‌نام جدید*\n\n"
-                    f"*نام:* {user_name}\n"
-                    f"*تلفن:* {user_phone}\n"
-                    f"*پلن:* {plan_name_fa}\n"
-                    f"*کد کاربر:* {new_user_id}\n\n"
-                    f"رسید واریزی در تصویر بالا منتظر تایید شماست."
-                )
-                
-                await context.bot.send_photo(
-                    chat_id=admin_id,
-                    photo=receipt_url,
-                    caption=admin_message,
-                    parse_mode="Markdown",
-                    reply_markup=InlineKeyboardMarkup([[approve_btn, reject_btn]])
-                )
-            except Exception as e:
-                logger.error(f"Error notifying admin {admin_id}: {e}")
-        
-        # Confirm to user
-        await update.message.reply_text(
-            "✅ اطلاعات شما ثبت شد و در انتظار تأیید است.\n"
-            "به محض تأیید توسط ادمین، پیام تایید برای شما ارسال خواهد شد.",
-            reply_markup=None  # Remove keyboard
-        )
-        
-        # Clear user data
-        context.user_data.clear()
-        return ConversationHandler.END
-        
-    except Exception as e:
-        logger.error(f"Error finishing offline registration: {e}")
-        await update.message.reply_text(
-            "❌ خطا در ثبت اطلاعات. لطفاً دوباره تلاش کنید یا با پشتیبانی تماس بگیرید."
-        )
-        return ConversationHandler.END
-
-
-async def on_admin_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle admin approve/reject callbacks"""
-    query = update.callback_query
-    admin_id = update.effective_user.id
-    
-    # Check admin authorization
-    if admin_id not in ADMIN_IDS:
-        await query.answer("❌ شما دسترسی به این عملیات را ندارید.", show_alert=True)
-        return
-    
-    data = query.data
-    action, user_id_str = data.split('_', 1)
-    user_id = int(user_id_str)
-    
-    try:
-        # Check if already processed
-        user_record = supabase.table("users").select("status,telegram_id,name,plan").eq("id", user_id).execute()
-        if not user_record.data:
-            await query.answer("❌ کاربر یافت نشد.", show_alert=True)
-            return
-        
-        current_status = user_record.data[0].get("status")
-        if current_status in ["confirmed", "rejected"]:
-            await query.answer(
-                f"⚠️ این ثبت‌نام قبلاً {current_status} شده است.",
-                show_alert=True
-            )
-            return
-        
-        user_telegram_id = user_record.data[0]["telegram_id"]
-        user_name = user_record.data[0]["name"]
-        user_plan = user_record.data[0]["plan"]
-        
-        if action == "approve":
-            # Update user status
-            supabase.table("users").update({
-                "status": "confirmed"
-            }).eq("id", user_id).execute()
-            
-            # Update receipt status
-            supabase.table("receipts").update({
-                "status": "approved",
-                "admin_id": admin_id
-            }).eq("user_id", user_id).execute()
-            
-            # Notify user
-            tracking_code = f"W{user_id:05d}"
-            persian_date = jdatetime.datetime.fromgregorian(
-                datetime=datetime.utcnow(),
-                locale=jdatetime.FA_LOCALE
-            )
-            date_str = persian_date.strftime("%d %B %Y - %H:%M")
-            
-            await context.bot.send_message(
-                chat_id=user_telegram_id,
-                text=(
-                    f"✅ ثبت‌نام شما تأیید شد!\n\n"
-                    f"*کد پیگیری:* `{tracking_code}`\n"
-                    f"*تاریخ تأیید:* {date_str}\n\n"
-                    f"منتظر پیام‌های بعدی ما باشید."
-                ),
-                parse_mode='Markdown'
-            )
-            
-            # Start learning path
-            await start_learning_path_for_user(context.bot, user_telegram_id)
-            
-            await query.answer("✅ تأیید شد")
-            
-        elif action == "reject":
-            # Update user status
-            supabase.table("users").update({
-                "status": "rejected"
-            }).eq("id", user_id).execute()
-            
-            # Update receipt status
-            supabase.table("receipts").update({
-                "status": "rejected",
-                "admin_id": admin_id
-            }).eq("user_id", user_id).execute()
-            
-            # Notify user
-            await context.bot.send_message(
-                chat_id=user_telegram_id,
-                text=(
-                    "❌ متأسفانه پرداخت شما تأیید نشد.\n\n"
-                    "لطفاً با پشتیبانی تماس بگیرید یا دوباره تلاش کنید."
-                )
-            )
-            
-            await query.answer("❌ رد شد")
-        
-        # Update admin message
-        admin_name = update.effective_user.first_name or "Admin"
-        status_emoji = "✅" if action == "approve" else "❌"
-        new_caption = (
-            query.message.caption + 
-            f"\n\n{status_emoji} {action.upper()} توسط {admin_name}"
-        )
-        
-        await query.edit_message_caption(
-            caption=new_caption,
-            reply_markup=None  # Remove buttons
-        )
-        
-    except Exception as e:
-        logger.error(f"Error processing admin decision: {e}")
-        await query.answer("❌ خطا در پردازش درخواست.", show_alert=True)
-
-
-@restricted
-async def submissions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Admin command to view registrations"""
-    args = context.args
-    
-    try:
-        query = supabase.table("users")
-        
-        if not args:
-            # Default: show pending
-            query = query.select("id,name,phone,plan,status,timestamp").eq("status", "pending").order("timestamp", desc=True)
-            title = "📋 لیست ثبت‌نام‌های در انتظار تایید:\n\n"
+        # Check if contact was shared
+        if update.message.contact:
+            phone = update.message.contact.phone_number
         else:
-            param = args[0].lower()
-            if param in ["pending", "confirmed", "rejected"]:
-                query = query.select("id,name,phone,plan,status,timestamp").eq("status", param).order("timestamp", desc=True)
-                status_fa = {"pending": "در انتظار", "confirmed": "تأیید شده", "rejected": "رد شده"}[param]
-                title = f"📋 لیست ثبت‌نام‌های {status_fa}:\n\n"
-            else:
-                # Search by keyword
-                keyword = ' '.join(args)
-                query = query.select("id,name,phone,plan,status,timestamp").ilike("name", f"%{keyword}%").order("timestamp", desc=True)
-                title = f"🔍 نتایج جستجو برای \"{keyword}\":\n\n"
+            phone = update.message.text.strip()
         
-        result = query.execute()
-        rows = result.data
+        if not phone or len(phone) < 10:
+            await update.message.reply_text("❌ شماره موبایل معتبر نیست. لطفاً دوباره وارد کنید:")
+            return WAITING_PHONE
         
-        if not rows:
-            await update.message.reply_text("موردی یافت نشد.")
+        context.user_data["phone"] = phone
+        
+        # Complete registration
+        await finish_registration(update, context)
+        
+        # Ask about Python installation
+        keyboard = [
+            [InlineKeyboardButton("✅ بله", callback_data="python_yes")],
+            [InlineKeyboardButton("❌ خیر", callback_data="python_no")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            "🎯 **سوال مهم:**\n\n"
+            "آیا پایتون روی کامپیوتر شما نصب است؟",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+        
+        return WAITING_PYTHON_STATUS
+        
+    except Exception as e:
+        logger.error(f"Error in handle_phone: {e}")
+        await update.message.reply_text("❌ خطایی رخ داد. لطفاً دوباره تلاش کنید.")
+        return WAITING_PHONE
+
+async def finish_registration(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Complete registration and save to database"""
+    try:
+        user_id = update.effective_user.id
+        user_name = context.user_data.get("name")
+        user_phone = context.user_data.get("phone")
+        
+        if not user_name or not user_phone:
+            await update.message.reply_text("❌ اطلاعات ناقص است.")
             return
         
-        text = title
-        for r in rows:
-            status_fa = {"pending": "⏳ در انتظار", "confirmed": "✅ تأیید شده", "rejected": "❌ رد شده"}.get(r.get("status", ""), r.get("status", ""))
-            text += f"• {r['name']} ({r['phone']})\n  پلن: {r['plan']} | وضعیت: {status_fa} | کد: {r['id']}\n\n"
+        if not supabase:
+            await update.message.reply_text("⚠️ دیتابیس در دسترس نیست. لطفاً بعداً تلاش کنید.")
+            return
         
-        # Telegram message limit is 4096 characters
-        if len(text) > 4000:
-            text = text[:4000] + "\n\n... (نتایج بیشتر حذف شد)"
+        # Check if user exists
+        existing = check_existing_registration(user_id)
+        if existing:
+            # Update existing user
+            supabase.table("users").update({
+                "name": user_name,
+                "phone": user_phone,
+                "plan": "رایگان",
+                "payment_method": "none",
+                "status": "confirmed"
+            }).eq("telegram_id", user_id).execute()
+        else:
+            # Insert new user
+            user_data = {
+                "telegram_id": user_id,
+                "name": user_name,
+                "phone": user_phone,
+                "plan": "رایگان",
+                "payment_method": "none",
+                "status": "confirmed"
+            }
+            supabase.table("users").insert(user_data).execute()
         
-        await update.message.reply_text(text)
+        logger.info(f"User {user_id} registered successfully")
         
     except Exception as e:
-        logger.error(f"Error in submissions command: {e}")
-        await update.message.reply_text("❌ خطا در دریافت اطلاعات.")
+        logger.error(f"Error in finish_registration: {e}")
+        raise
 
-
-# ==================== LEARNING PATH FUNCTIONS ====================
-
-def check_user_access(telegram_id: int) -> dict:
-    """Check if user has confirmed registration"""
+async def handle_python_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle Python installation status"""
     try:
-        result = supabase.table("users").select("id,status,plan").eq("telegram_id", telegram_id).execute()
-        if result.data and result.data[0]["status"] == "confirmed":
-            return result.data[0]
-        return None
+        query = update.callback_query
+        await query.answer()
+        
+        user_id = update.effective_user.id
+        choice = query.data
+        
+        if choice == "python_yes":
+            await query.edit_message_text(
+                "✅ عالی! شما آماده شروع یادگیری هستید.\n\n"
+                "از دستور /lessons برای مشاهده فهرست درس‌ها استفاده کنید."
+            )
+            # Start learning path
+            await show_lessons_menu(update, context)
+        else:
+            await query.edit_message_text(
+                "📦 **راهنمای نصب پایتون:**\n\n"
+                "1. به سایت python.org بروید\n"
+                "2. آخرین نسخه Python 3.11+ را دانلود کنید\n"
+                "3. هنگام نصب، گزینه 'Add Python to PATH' را تیک بزنید\n"
+                "4. بعد از نصب، از دستور /lessons استفاده کنید"
+            )
+        
+        return ConversationHandler.END
+        
     except Exception as e:
-        logger.error(f"Error checking user access: {e}")
-        return None
+        logger.error(f"Error in handle_python_status: {e}")
+        return ConversationHandler.END
 
-def get_user_current_lesson(telegram_id: int) -> Optional[int]:
-    """Get the next lesson number for user"""
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Cancel current operation"""
+    await update.message.reply_text("❌ عملیات لغو شد.")
+    context.user_data.clear()
+    return ConversationHandler.END
+
+def check_lesson_exam_passed(telegram_id: int, lesson_number: int) -> bool:
+    """Check if user passed exam for a lesson"""
+    if not supabase:
+        return False
+    
     try:
-        # Get completed lessons
-        completed = supabase.table("user_progress").select("lesson_id").eq("telegram_id", telegram_id).eq("is_completed", True).execute()
-        completed_ids = [r["lesson_id"] for r in completed.data] if completed.data else []
+        # Get lesson ID
+        lesson_result = supabase.table("lessons").select("id").eq("lesson_number", lesson_number).execute()
+        if not lesson_result.data:
+            logger.debug(f"Lesson {lesson_number} not found")
+            return False
         
-        # Get all lessons ordered by lesson_number
-        all_lessons = supabase.table("lessons").select("id,lesson_number,is_free").order("lesson_number").execute()
+        lesson_id = lesson_result.data[0]["id"]
         
-        if not all_lessons.data:
-            return None
+        # Check progress
+        progress_result = supabase.table("user_progress").select("is_completed").eq("telegram_id", telegram_id).eq("lesson_id", lesson_id).execute()
         
-        # Find first incomplete lesson
-        for lesson in all_lessons.data:
-            if lesson["id"] not in completed_ids:
-                return lesson["lesson_number"]
+        if not progress_result.data:
+            logger.debug(f"No progress record for user {telegram_id}, lesson {lesson_number}")
+            return False
         
-        return None
+        is_completed = progress_result.data[0].get("is_completed", False)
+        logger.debug(f"User {telegram_id}, lesson {lesson_number}: is_completed = {is_completed}")
+        return is_completed
+        
     except Exception as e:
-        logger.error(f"Error getting user current lesson: {e}")
-        return None
+        logger.error(f"Error checking exam status: {e}")
+        return False
+
+async def show_lessons_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show lessons menu"""
+    try:
+        user_id = update.effective_user.id
+        
+        if not supabase:
+            await update.effective_message.reply_text("⚠️ دیتابیس در دسترس نیست.")
+            return
+        
+        # Get all lessons from database
+        result = supabase.table("lessons").select("id,lesson_number,title,is_free").order("lesson_number").execute()
+        
+        if not result.data:
+            await update.effective_message.reply_text(
+                "⚠️ در حال حاضر درسی موجود نیست.\n"
+                "لطفاً با ادمین تماس بگیرید."
+            )
+            return
+        
+        # Build keyboard
+        keyboard = []
+        buttons_per_row = 2
+        
+        for lesson in result.data:
+            try:
+                lesson_num = lesson["lesson_number"]
+                title = lesson.get("title", "")
+                
+                # Determine status icon
+                if lesson_num == 1:
+                    status_icon = "🆓"  # First lesson is always free
+                else:
+                    # Check if previous lesson exam passed
+                    prev_passed = check_lesson_exam_passed(user_id, lesson_num - 1)
+                    if not prev_passed:
+                        status_icon = "🔒"  # Locked
+                    else:
+                        status_icon = "🆓"  # All lessons are free now
+                
+                button_text = f"{status_icon} درس {lesson_num}"
+                if title and len(title) > 15:
+                    button_text += f": {title[:15]}..."
+                elif title:
+                    button_text += f": {title}"
+                
+                # Add button
+                if len(keyboard) == 0 or len(keyboard[-1]) >= buttons_per_row:
+                    keyboard.append([InlineKeyboardButton(button_text, callback_data=f"lesson_{lesson_num}")])
+                else:
+                    keyboard[-1].append(InlineKeyboardButton(button_text, callback_data=f"lesson_{lesson_num}"))
+            except Exception as e:
+                logger.error(f"Error processing lesson {lesson.get('lesson_number', 'unknown')}: {e}")
+                continue
+        
+        # Add navigation buttons
+        keyboard.append([InlineKeyboardButton("📊 پیشرفت من", callback_data="my_progress")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        menu_text = (
+            f"📚 **فهرست درس‌ها** ({TOTAL_LESSONS} درس)\n\n"
+            "🆓 همه درس‌ها رایگان هستند!\n"
+            "🔒 درس‌های قفل شده نیاز به قبولی آزمون قبلی دارند.\n\n"
+            "یک درس را انتخاب کنید:"
+        )
+        
+        if hasattr(update, 'callback_query') and update.callback_query:
+            await update.callback_query.edit_message_text(menu_text, reply_markup=reply_markup, parse_mode='Markdown')
+        else:
+            await update.effective_message.reply_text(menu_text, reply_markup=reply_markup, parse_mode='Markdown')
+            
+    except Exception as e:
+        logger.error(f"Error in show_lessons_menu: {e}", exc_info=True)
+        if update.effective_message:
+            await update.effective_message.reply_text("❌ خطا در نمایش منوی درس‌ها.")
 
 def get_lesson_data(lesson_number: int):
     """Get lesson data from database"""
+    if not supabase:
+        return None
+    
     try:
         result = supabase.table("lessons").select("*").eq("lesson_number", lesson_number).execute()
         if result.data:
-            lesson = result.data[0]
-            lesson["content"] = json.loads(lesson["content"])
-            lesson["code_examples"] = json.loads(lesson.get("code_examples", "[]"))
-            lesson["expected_outputs"] = json.loads(lesson.get("expected_outputs", "[]"))
-            return lesson
+            return result.data[0]
         return None
     except Exception as e:
         logger.error(f"Error getting lesson data: {e}")
         return None
 
-def get_lesson_questions(lesson_id: int):
-    """Get questions for a lesson"""
-    try:
-        result = supabase.table("questions").select("*").eq("lesson_id", lesson_id).order("question_number").execute()
-        return result.data if result.data else []
-    except Exception as e:
-        logger.error(f"Error getting lesson questions: {e}")
-        return []
-
-def mark_lesson_started(telegram_id: int, lesson_id: int):
-    """Mark lesson as started"""
-    try:
-        supabase.table("user_progress").upsert({
-            "telegram_id": telegram_id,
-            "lesson_id": lesson_id,
-            "started_at": datetime.utcnow().isoformat(),
-            "is_completed": False
-        }).execute()
-    except Exception as e:
-        logger.error(f"Error marking lesson started: {e}")
-
-def mark_lesson_completed(telegram_id: int, lesson_id: int):
-    """Mark lesson as completed"""
-    try:
-        supabase.table("user_progress").upsert({
-            "telegram_id": telegram_id,
-            "lesson_id": lesson_id,
-            "completed_at": datetime.utcnow().isoformat(),
-            "is_completed": True
-        }).execute()
-    except Exception as e:
-        logger.error(f"Error marking lesson completed: {e}")
-
-async def send_lesson_content(update_or_bot, chat_id: int, lesson_data: dict):
-    """Send lesson content (can be multiple messages)"""
-    contents = lesson_data.get("content", [])
-    
-    for i, content in enumerate(contents):
-        if i == 0:
-            # First message with title
-            message = f"📚 *{lesson_data['title']}*\n\n{content}"
-            if isinstance(update_or_bot, Update):
-                await update_or_bot.message.reply_text(message, parse_mode='Markdown')
-            else:
-                await update_or_bot.send_message(chat_id=chat_id, text=message, parse_mode='Markdown')
-        else:
-            # Additional content
-            if isinstance(update_or_bot, Update):
-                await update_or_bot.message.reply_text(content, parse_mode='Markdown')
-            else:
-                await update_or_bot.send_message(chat_id=chat_id, text=content, parse_mode='Markdown')
-    
-    # Send code examples if any
-    code_examples = lesson_data.get("code_examples", [])
-    expected_outputs = lesson_data.get("expected_outputs", [])
-    
-    if code_examples:
-        for i, code in enumerate(code_examples):
-            code_msg = f"```python\n{code}\n```"
-            if isinstance(update_or_bot, Update):
-                await update_or_bot.message.reply_text(code_msg, parse_mode='Markdown')
-            else:
-                await update_or_bot.send_message(chat_id=chat_id, text=code_msg, parse_mode='Markdown')
-            
-            if i < len(expected_outputs):
-                output_msg = f"**خروجی:**\n```\n{expected_outputs[i]}\n```"
-                if isinstance(update_or_bot, Update):
-                    await update_or_bot.message.reply_text(output_msg, parse_mode='Markdown')
-                else:
-                    await update_or_bot.send_message(chat_id=chat_id, text=output_msg, parse_mode='Markdown')
-
-async def send_lesson(update_or_bot, chat_id: int, lesson_number: int):
+async def send_lesson(update_or_bot, chat_id: int, lesson_number: int, context=None):
     """Send a complete lesson to user"""
-    lesson_data = get_lesson_data(lesson_number)
-    if not lesson_data:
-        error_msg = "❌ درس یافت نشد."
-        if isinstance(update_or_bot, Update):
-            await update_or_bot.message.reply_text(error_msg)
-        else:
-            await update_or_bot.send_message(chat_id=chat_id, text=error_msg)
-        return
-    
-    # Check access for paid lessons
-    if not lesson_data["is_free"]:
-        user_access = check_user_access(chat_id)
-        if not user_access:
-            error_msg = (
-                "🔒 این درس نیاز به ثبت‌نام دارد.\n\n"
-                "برای دسترسی به درس‌های پیشرفته، لطفاً ثبت‌نام کنید:\n"
-                "/start"
-            )
+    try:
+        logger.info(f"Sending lesson {lesson_number} to user {chat_id}")
+        
+        lesson_data = get_lesson_data(lesson_number)
+        if not lesson_data:
+            error_msg = "❌ درس یافت نشد."
             if isinstance(update_or_bot, Update):
                 await update_or_bot.message.reply_text(error_msg)
+            elif hasattr(update_or_bot, 'edit_message_text'):
+                await update_or_bot.edit_message_text(error_msg)
             else:
                 await update_or_bot.send_message(chat_id=chat_id, text=error_msg)
             return
-    
-    # Mark lesson as started
-    mark_lesson_started(chat_id, lesson_data["id"])
-    
-    # Send lesson content
-    await send_lesson_content(update_or_bot, chat_id, lesson_data)
-    
-    # Send questions
-    questions = get_lesson_questions(lesson_data["id"])
-    if questions:
-        question_msg = "\n\n❓ **سوالات این درس:**\n\n"
-        for i, q in enumerate(questions, 1):
-            question_msg += f"*سوال {i}:* {q['question_text']}\n\n"
         
-        question_msg += "برای پاسخ به سوالات از دستور /answer استفاده کنید."
+        # Check if previous lesson exam is passed (except for first lesson)
+        if lesson_number > 1:
+            prev_passed = check_lesson_exam_passed(chat_id, lesson_number - 1)
+            if not prev_passed:
+                error_msg = (
+                    f"🔒 **این درس قفل است!**\n\n"
+                    f"برای دسترسی به درس {lesson_number}، باید آزمون درس {lesson_number - 1} را قبول کنید.\n\n"
+                    f"از منوی درس‌ها، درس {lesson_number - 1} را انتخاب کنید و آزمون آن را بدهید."
+                )
+                if isinstance(update_or_bot, Update):
+                    await update_or_bot.message.reply_text(error_msg, parse_mode='Markdown')
+                elif hasattr(update_or_bot, 'edit_message_text'):
+                    await update_or_bot.edit_message_text(error_msg, parse_mode='Markdown')
+                else:
+                    await update_or_bot.send_message(chat_id=chat_id, text=error_msg, parse_mode='Markdown')
+                return
+        
+        # Parse content
+        content = json.loads(lesson_data.get("content", "[]"))
+        title = lesson_data.get("title", f"درس {lesson_number}")
+        
+        # Send lesson content
+        lesson_text = f"📚 **{title}**\n\n"
+        
+        for i, section in enumerate(content, 1):
+            if i > 1:
+                lesson_text += "\n" + "─" * 30 + "\n\n"
+            lesson_text += section
+        
+        # Parse code examples
+        code_examples = json.loads(lesson_data.get("code_examples", "[]"))
+        expected_outputs = json.loads(lesson_data.get("expected_outputs", "[]"))
+        
+        if code_examples:
+            lesson_text += "\n\n" + "─" * 30 + "\n\n"
+            lesson_text += "💻 **مثال‌های کد:**\n\n"
+            for i, code in enumerate(code_examples, 1):
+                lesson_text += f"```python\n{code}\n```\n\n"
+                if i < len(expected_outputs):
+                    lesson_text += f"**خروجی:**\n```\n{expected_outputs[i-1]}\n```\n\n"
+        
+        # Navigation buttons
+        keyboard = []
+        if lesson_number > 1:
+            keyboard.append([InlineKeyboardButton("⬅️ درس قبلی", callback_data=f"lesson_{lesson_number - 1}")])
+        
+        if lesson_number < TOTAL_LESSONS:
+            keyboard.append([InlineKeyboardButton("➡️ درس بعدی", callback_data=f"lesson_{lesson_number + 1}")])
+        
+        keyboard.append([
+            InlineKeyboardButton("📚 منوی درس‌ها", callback_data="lessons_menu"),
+            InlineKeyboardButton("🏠 منوی اصلی", callback_data="main_menu")
+        ])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        # Send lesson
+        sent_message = None
+        if isinstance(update_or_bot, Update):
+            sent_message = await update_or_bot.message.reply_text(lesson_text, reply_markup=reply_markup, parse_mode='Markdown')
+        elif hasattr(update_or_bot, 'edit_message_text'):
+            sent_message = await update_or_bot.edit_message_text(lesson_text, reply_markup=reply_markup, parse_mode='Markdown')
+        else:
+            sent_message = await update_or_bot.send_message(chat_id=chat_id, text=lesson_text, reply_markup=reply_markup, parse_mode='Markdown')
+        
+        # Store lesson message ID for later reference
+        if sent_message and hasattr(sent_message, 'message_id'):
+            if isinstance(update_or_bot, Update) and update_or_bot.message:
+                context = update_or_bot.message._bot._application._context if hasattr(update_or_bot.message, '_bot') else None
+            elif hasattr(update_or_bot, 'context'):
+                context = update_or_bot.context
+            else:
+                context = None
+            
+            if context:
+                context.user_data["lesson_message_id"] = sent_message.message_id
+        
+        # Don't auto-start exam - let user click a button to start exam
+        exam_keyboard = [[InlineKeyboardButton("📝 شروع آزمون", callback_data=f"start_exam_{lesson_number}")]]
+        exam_reply_markup = InlineKeyboardMarkup(exam_keyboard)
+        
+        exam_prompt = f"✅ درس {lesson_number} ارسال شد!\n\n📝 برای شروع آزمون، دکمه زیر را بزنید:"
         
         if isinstance(update_or_bot, Update):
-            await update_or_bot.message.reply_text(question_msg, parse_mode='Markdown')
+            await update_or_bot.message.reply_text(exam_prompt, reply_markup=exam_reply_markup)
+        elif hasattr(update_or_bot, 'send_message'):
+            await update_or_bot.send_message(chat_id=chat_id, text=exam_prompt, reply_markup=exam_reply_markup)
         else:
-            await update_or_bot.send_message(chat_id=chat_id, text=question_msg, parse_mode='Markdown')
-    
-    # Mark lesson as completed
-    mark_lesson_completed(chat_id, lesson_data["id"])
+            await update_or_bot.edit_message_text(exam_prompt, reply_markup=exam_reply_markup)
+        
+    except Exception as e:
+        logger.error(f"Error sending lesson {lesson_number}: {e}", exc_info=True)
+        error_msg = f"❌ خطا در ارسال درس.\n\nخطا: {str(e)[:100]}"
+        if isinstance(update_or_bot, Update):
+            await update_or_bot.message.reply_text(error_msg)
+        elif hasattr(update_or_bot, 'edit_message_text'):
+            await update_or_bot.edit_message_text(error_msg)
+        else:
+            await update_or_bot.send_message(chat_id=chat_id, text=error_msg)
 
-async def start_learning_path(update: Update, context: ContextTypes.DEFAULT_TYPE, telegram_id: int):
-    """Start learning path for user after registration"""
-    await start_learning_path_for_user(context.bot, telegram_id)
+async def start_lesson_exam(update_or_bot, chat_id: int, lesson_id: int, lesson_number: int, context=None):
+    """Start exam for a lesson"""
+    try:
+        # Get questions from database
+        result = supabase.table("questions").select("*").eq("lesson_id", lesson_id).order("question_number").execute()
+        
+        if not result.data:
+            logger.warning(f"No questions found for lesson {lesson_number}")
+            error_msg = "❌ سوالی برای این درس یافت نشد."
+            if hasattr(update_or_bot, 'edit_message_text'):
+                await update_or_bot.edit_message_text(error_msg)
+            elif hasattr(update_or_bot, 'send_message'):
+                await update_or_bot.send_message(chat_id=chat_id, text=error_msg)
+            return
+        
+        questions = result.data
+        
+        # Get context
+        if context is None:
+            if hasattr(update_or_bot, 'context') and update_or_bot.context:
+                context = update_or_bot.context
+            elif isinstance(update_or_bot, Update):
+                # Try to get context from update
+                if hasattr(update_or_bot, '_bot') and hasattr(update_or_bot._bot, '_application'):
+                    context = update_or_bot._bot._application._context
+                else:
+                    logger.error("Cannot get context for exam")
+                    return
+            else:
+                logger.error("Cannot get context for exam")
+                return
+        
+        # Store exam data in context
+        context.user_data["exam_questions"] = questions
+        context.user_data["exam_current_question"] = 0
+        context.user_data["exam_lesson_id"] = lesson_id
+        context.user_data["exam_lesson_number"] = lesson_number
+        context.user_data["exam_answers"] = []
+        context.user_data["exam_shown_answers"] = set()
+        context.user_data["waiting_exam_answer"] = True
+        
+        # Send first question
+        await send_exam_question(update_or_bot, chat_id, context, 0)
+        
+    except Exception as e:
+        logger.error(f"Error starting exam: {e}", exc_info=True)
+        error_msg = f"❌ خطا در شروع آزمون: {str(e)[:100]}"
+        if hasattr(update_or_bot, 'edit_message_text'):
+            await update_or_bot.edit_message_text(error_msg)
+        elif hasattr(update_or_bot, 'send_message'):
+            await update_or_bot.send_message(chat_id=chat_id, text=error_msg)
 
-async def start_learning_path_for_user(bot, telegram_id: int):
-    """Start learning path for a user (can be called from admin approval)"""
-    welcome_msg = (
-        "🎓 **به مسیر یادگیری پایتون خوش آمدید!**\n\n"
-        "شما می‌توانید از درس‌های رایگان استفاده کنید.\n"
-        "برای شروع، اولین درس را برای شما ارسال می‌کنم...\n\n"
-        "دستورات مفید:\n"
-        "/lessons - مشاهده لیست درس‌ها\n"
-        "/next - درس بعدی\n"
-        "/progress - پیشرفت شما"
-    )
-    
-    await bot.send_message(chat_id=telegram_id, text=welcome_msg, parse_mode='Markdown')
-    
-    # Send first lesson
-    await send_lesson(bot, telegram_id, 0)
+async def send_exam_question(update_or_bot, chat_id: int, context, question_index: int):
+    """Send an exam question"""
+    try:
+        questions = context.user_data.get("exam_questions", [])
+        if question_index >= len(questions):
+            return
+        
+        question = questions[question_index]
+        lesson_number = context.user_data.get("exam_lesson_number", "?")
+        question_text = f"📝 *آزمون درس {lesson_number}*\n\n❓ *سوال {question_index + 1} از {len(questions)}:*\n\n{question['question_text']}"
+        
+        keyboard = []
+        
+        # Parse options if multiple choice
+        if question.get("question_type") == "multiple_choice" and question.get("options"):
+            options = json.loads(question["options"])
+            for i, option in enumerate(options):
+                keyboard.append([InlineKeyboardButton(option, callback_data=f"exam_answer_{question_index}_{i}")])
+        
+        # Add show answer button
+        keyboard.append([InlineKeyboardButton("💡 نمایش جواب", callback_data=f"exam_show_answer_{question_index}")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        # Always send as new message, don't edit previous message
+        # Get bot instance from context
+        bot = context.bot if hasattr(context, 'bot') else None
+        
+        if isinstance(update_or_bot, Update):
+            await update_or_bot.message.reply_text(question_text, reply_markup=reply_markup, parse_mode='Markdown')
+        elif bot:
+            # Use bot.send_message to send new message
+            await bot.send_message(chat_id=chat_id, text=question_text, reply_markup=reply_markup, parse_mode='Markdown')
+        elif hasattr(update_or_bot, 'send_message'):
+            await update_or_bot.send_message(chat_id=chat_id, text=question_text, reply_markup=reply_markup, parse_mode='Markdown')
+        elif hasattr(update_or_bot, 'message') and hasattr(update_or_bot.message, 'reply_text'):
+            await update_or_bot.message.reply_text(question_text, reply_markup=reply_markup, parse_mode='Markdown')
+        else:
+            logger.error("Cannot send exam question - no bot instance available")
+            
+    except Exception as e:
+        logger.error(f"Error sending exam question: {e}", exc_info=True)
+
+async def handle_exam_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle exam answer"""
+    try:
+        user_id = update.effective_user.id
+        
+        # Check if in exam mode
+        if not context.user_data.get("waiting_exam_answer", False):
+            return
+        
+        user_answer = update.message.text.strip() if update.message and update.message.text else None
+        if not user_answer:
+            return
+        
+        current_question = context.user_data.get("exam_current_question", 0)
+        questions = context.user_data.get("exam_questions", [])
+        
+        if current_question >= len(questions):
+            return
+        
+        question = questions[current_question]
+        correct_answer = question.get("correct_answer", "").strip().lower()
+        user_answer_lower = user_answer.strip().lower()
+        
+        is_correct = user_answer_lower == correct_answer
+        
+        # Store answer
+        context.user_data["exam_answers"].append({
+            "question_id": question["id"],
+            "user_answer": user_answer,
+            "is_correct": is_correct
+        })
+        
+        if is_correct:
+            await update.message.reply_text("✅ صحیح! سوال بعدی...")
+            context.user_data["exam_current_question"] += 1
+            
+            if context.user_data["exam_current_question"] < len(questions):
+                await send_exam_question(update, user_id, context, context.user_data["exam_current_question"])
+            else:
+                await finish_exam(update, context)
+        else:
+            await update.message.reply_text("❌ اشتباه است. لطفاً دوباره تلاش کنید.")
+            
+    except Exception as e:
+        logger.error(f"Error handling exam answer: {e}", exc_info=True)
+
+async def handle_exam_answer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle exam answer from callback (multiple choice)"""
+    try:
+        query = update.callback_query
+        await query.answer()
+        
+        # Handle start exam button
+        if query.data.startswith("start_exam_"):
+            lesson_number = int(query.data.split("_")[-1])
+            lesson_data = get_lesson_data(lesson_number)
+            if not lesson_data:
+                await query.edit_message_text("❌ درس یافت نشد.")
+                return
+            
+            # Start exam - pass context explicitly
+            await query.edit_message_text("⏳ در حال شروع آزمون...")
+            # Use bot from context to send messages
+            bot = context.bot
+            await start_lesson_exam(bot, query.from_user.id, lesson_data["id"], lesson_number, context)
+            return
+        
+        # Check if showing answer
+        if query.data.startswith("exam_show_answer_"):
+            question_index = int(query.data.split("_")[-1])
+            questions = context.user_data.get("exam_questions", [])
+            if question_index < len(questions):
+                question = questions[question_index]
+                correct_answer = question.get("correct_answer", "")
+                explanation = question.get("explanation", "")
+                
+                answer_text = f"💡 **جواب صحیح:** {correct_answer}"
+                if explanation:
+                    answer_text += f"\n\n📝 **توضیح:** {explanation}"
+                
+                # Mark as shown (doesn't count in score)
+                context.user_data["exam_shown_answers"].add(question_index)
+                
+                # Add next button
+                keyboard = [[InlineKeyboardButton("➡️ سوال بعدی", callback_data=f"exam_next_{question_index}")]]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                await query.edit_message_text(answer_text, reply_markup=reply_markup, parse_mode='Markdown')
+            return
+        
+        # Handle next after showing answer
+        if query.data.startswith("exam_next_"):
+            question_index = int(query.data.split("_")[-1])
+            context.user_data["exam_current_question"] = question_index + 1
+            
+            questions = context.user_data.get("exam_questions", [])
+            if context.user_data["exam_current_question"] < len(questions):
+                await send_exam_question(query, query.from_user.id, context, context.user_data["exam_current_question"])
+            else:
+                await finish_exam(query, context)
+            return
+        
+        # Handle answer selection
+        if query.data.startswith("exam_answer_"):
+            parts = query.data.split("_")
+            question_index = int(parts[2])
+            option_index = int(parts[3])
+            
+            questions = context.user_data.get("exam_questions", [])
+            if question_index >= len(questions):
+                return
+            
+            question = questions[question_index]
+            options = json.loads(question.get("options", "[]"))
+            user_answer = options[option_index]
+            correct_answer = question.get("correct_answer", "").strip()
+            
+            is_correct = user_answer.strip() == correct_answer.strip()
+            
+            # Store answer
+            context.user_data["exam_answers"].append({
+                "question_id": question["id"],
+                "user_answer": user_answer,
+                "is_correct": is_correct
+            })
+            
+            # Update current question index
+            context.user_data["exam_current_question"] = question_index + 1
+            
+            # Send feedback as new message
+            bot = context.bot if hasattr(context, 'bot') else None
+            if bot:
+                if is_correct:
+                    await bot.send_message(chat_id=query.from_user.id, text="✅ صحیح!")
+                else:
+                    await bot.send_message(chat_id=query.from_user.id, text=f"❌ اشتباه! جواب صحیح: {correct_answer}")
+            
+            # Edit the question message to remove buttons
+            try:
+                await query.edit_message_text(query.message.text + "\n\n✅ پاسخ ثبت شد")
+            except Exception as e:
+                logger.warning(f"Could not edit message: {e}")
+            
+            # Send next question or finish exam
+            if context.user_data["exam_current_question"] < len(questions):
+                await asyncio.sleep(1)
+                # Send next question as new message
+                if bot:
+                    await send_exam_question(bot, query.from_user.id, context, context.user_data["exam_current_question"])
+                else:
+                    await send_exam_question(query, query.from_user.id, context, context.user_data["exam_current_question"])
+            else:
+                await finish_exam(query, context)
+                
+    except Exception as e:
+        logger.error(f"Error handling exam callback: {e}", exc_info=True)
+
+async def finish_exam(update_or_bot, context):
+    """Finish exam and show results"""
+    try:
+        user_id = update_or_bot.from_user.id if hasattr(update_or_bot, 'from_user') else update_or_bot.effective_user.id
+        questions = context.user_data.get("exam_questions", [])
+        answers = context.user_data.get("exam_answers", [])
+        shown_answers = context.user_data.get("exam_shown_answers", set())
+        lesson_id = context.user_data.get("exam_lesson_id")
+        lesson_number = context.user_data.get("exam_lesson_number")
+        
+        # Calculate score (excluding shown answers)
+        total_questions = len(questions)
+        answered_questions = len([a for i, a in enumerate(answers) if i not in shown_answers])
+        correct_answers = len([a for i, a in enumerate(answers) if a.get("is_correct") and i not in shown_answers])
+        
+        if answered_questions == 0:
+            score_percent = 0
+        else:
+            score_percent = int((correct_answers / answered_questions) * 100)
+        
+        # Save answers to database
+        if supabase:
+            try:
+                for answer in answers:
+                    supabase.table("question_answers").upsert({
+                        "telegram_id": user_id,
+                        "question_id": answer["question_id"],
+                        "user_answer": answer["user_answer"],
+                        "is_correct": answer["is_correct"]
+                    }, on_conflict="telegram_id,question_id").execute()
+            except Exception as e:
+                logger.error(f"Error saving answers: {e}")
+        
+        # Check if passed (70%)
+        passed = score_percent >= 70
+        
+        # Update progress
+        if supabase and passed:
+            try:
+                supabase.table("user_progress").upsert({
+                    "telegram_id": user_id,
+                    "lesson_id": lesson_id,
+                    "is_completed": True,
+                    "completed_at": datetime.now(timezone.utc).isoformat()
+                }, on_conflict="telegram_id,lesson_id").execute()
+            except Exception as e:
+                logger.error(f"Error updating progress: {e}")
+        
+        # Prepare result message
+        result_text = (
+            f"📊 **نتایج آزمون درس {lesson_number}**\n\n"
+            f"✅ پاسخ‌های صحیح: {correct_answers} از {answered_questions}\n"
+            f"📈 نمره: {score_percent}%\n\n"
+        )
+        
+        if passed:
+            result_text += "🎉 **تبریک! شما قبول شدید!**\n\n"
+            if lesson_number < TOTAL_LESSONS:
+                result_text += f"درس بعدی ({lesson_number + 1}) خودکار ارسال می‌شود..."
+        else:
+            result_text += "❌ متأسفانه قبول نشدید.\n\nنمره قبولی: 70%\n\nلطفاً درس را دوباره مطالعه کنید."
+        
+        # Navigation buttons
+        keyboard = []
+        if passed and lesson_number < TOTAL_LESSONS:
+            keyboard.append([InlineKeyboardButton("➡️ درس بعدی", callback_data=f"lesson_{lesson_number + 1}")])
+        else:
+            keyboard.append([InlineKeyboardButton("🔄 آزمون مجدد", callback_data=f"lesson_{lesson_number}")])
+        
+        keyboard.append([
+            InlineKeyboardButton("📚 منوی درس‌ها", callback_data="lessons_menu"),
+            InlineKeyboardButton("🏠 منوی اصلی", callback_data="main_menu")
+        ])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        # Send result
+        if hasattr(update_or_bot, 'edit_message_text'):
+            await update_or_bot.edit_message_text(result_text, reply_markup=reply_markup, parse_mode='Markdown')
+        elif hasattr(update_or_bot, 'send_message'):
+            await update_or_bot.send_message(chat_id=user_id, text=result_text, reply_markup=reply_markup, parse_mode='Markdown')
+        
+        # Auto-send next lesson if passed
+        if passed and lesson_number < TOTAL_LESSONS:
+            await asyncio.sleep(2)
+            await send_lesson(update_or_bot, user_id, lesson_number + 1, context)
+        
+        # Clear exam data
+        context.user_data.pop("exam_questions", None)
+        context.user_data.pop("exam_current_question", None)
+        context.user_data.pop("exam_answers", None)
+        context.user_data.pop("waiting_exam_answer", None)
+        context.user_data.pop("exam_shown_answers", None)
+        
+    except Exception as e:
+        logger.error(f"Error finishing exam: {e}", exc_info=True)
+
+async def handle_lesson_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle lesson selection from menu"""
+    try:
+        query = update.callback_query
+        await query.answer()
+        
+        user_id = query.from_user.id
+        
+        # Handle menu callbacks
+        if query.data == "lessons_menu":
+            await show_lessons_menu(update, context)
+            return
+        elif query.data == "main_menu":
+            await start(update, context)
+            return
+        
+        # Extract lesson number
+        if not query.data.startswith("lesson_"):
+            return
+        
+        lesson_number = int(query.data.split("_")[1])
+        
+        # Check if lesson exists
+        lesson_data = get_lesson_data(lesson_number)
+        if not lesson_data:
+            await query.edit_message_text("❌ درس یافت نشد.")
+            return
+        
+        # Send lesson - pass context to send_lesson
+        await query.edit_message_text("⏳ در حال بارگذاری درس...", parse_mode='Markdown')
+        await send_lesson(query, user_id, lesson_number, context)
+        
+    except Exception as e:
+        logger.error(f"Error handling lesson selection: {e}", exc_info=True)
+        if update.callback_query:
+            await update.callback_query.edit_message_text("❌ خطا در بارگذاری درس.")
 
 async def lessons_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show list of lessons"""
+    """Handle /lessons command"""
+    # Check registration
     user_id = update.effective_user.id
-    
-    try:
-        # Get all lessons
-        result = supabase.table("lessons").select("lesson_number,title,is_free,section").order("lesson_number").execute()
-        lessons = result.data if result.data else []
-        
-        # Get user progress
-        progress_result = supabase.table("user_progress").select("lesson_id,is_completed").eq("telegram_id", user_id).execute()
-        completed_lessons = {r["lesson_id"]: r["is_completed"] for r in progress_result.data} if progress_result.data else {}
-        
-        # Get lesson IDs
-        lesson_ids = {l["lesson_number"]: None for l in lessons}
-        for l in lessons:
-            lesson_id_result = supabase.table("lessons").select("id").eq("lesson_number", l["lesson_number"]).execute()
-            if lesson_id_result.data:
-                lesson_ids[l["lesson_number"]] = lesson_id_result.data[0]["id"]
-        
-        message = "📚 *لیست درس‌ها:*\n\n"
-        
-        current_section = None
-        for lesson in lessons:
-            # Add section header
-            if lesson["section"] != current_section:
-                current_section = lesson["section"]
-                section_names = {
-                    "intro": "🎯 مقدمه",
-                    "data_types": "📊 انواع داده‌ها",
-                    "operators": "➕ عملگرها",
-                    "functions": "🔧 توابع و شرط‌ها",
-                    "data_structures": "📦 ساختارهای داده",
-                    "methods_libraries": "📚 متدها و کتابخانه‌ها",
-                    "ml_theory": "🤖 یادگیری ماشین"
-                }
-                message += f"\n{section_names.get(current_section, current_section)}\n"
-            
-            # Check if completed
-            lesson_id = lesson_ids[lesson["lesson_number"]]
-            status = ""
-            if lesson_id and lesson_id in completed_lessons:
-                if completed_lessons[lesson_id]:
-                    status = " ✅"
-            
-            free_mark = "🆓" if lesson["is_free"] else "🔒"
-            message += f"{free_mark} درس {lesson['lesson_number']}: {lesson['title']}{status}\n"
-        
-        message += "\n\nبرای شروع یک درس از /next استفاده کنید."
-        
-        await update.message.reply_text(message, parse_mode='Markdown')
-        
-    except Exception as e:
-        logger.error(f"Error in lessons command: {e}")
-        await update.message.reply_text("❌ خطا در دریافت لیست درس‌ها.")
-
-async def next_lesson_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Send next lesson to user"""
-    user_id = update.effective_user.id
-    
-    # Check access
-    user_access = check_user_access(user_id)
-    if not user_access:
+    existing = check_existing_registration(user_id)
+    if not existing or existing.get("status") != "confirmed":
         await update.message.reply_text(
-            "❌ شما ثبت‌نام نکرده‌اید.\nبرای دسترسی به درس‌ها، لطفاً ثبت‌نام کنید:\n/start"
+            "⚠️ برای استفاده از درس‌ها باید ابتدا ثبت‌نام کنید.\n"
+            "از دستور /start استفاده کنید."
         )
         return
     
-    # Get next lesson
-    next_lesson_num = get_user_current_lesson(user_id)
-    
-    if next_lesson_num is None:
-        await update.message.reply_text("🎉 تبریک! شما همه درس‌ها را تمام کرده‌اید!")
-        return
-    
-    await send_lesson(update, user_id, next_lesson_num)
+    await show_lessons_menu(update, context)
 
 async def progress_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show user progress"""
-    user_id = update.effective_user.id
-    
+    """Handle /progress command"""
     try:
-        # Get completed lessons count
-        completed = supabase.table("user_progress").select("lesson_id").eq("telegram_id", user_id).eq("is_completed", True).execute()
-        completed_count = len(completed.data) if completed.data else 0
+        user_id = update.effective_user.id
         
-        # Get total lessons count
-        total = supabase.table("lessons").select("id", count="exact").execute()
-        total_count = total.count if hasattr(total, 'count') else 0
+        if not supabase:
+            await update.message.reply_text("⚠️ دیتابیس در دسترس نیست.")
+            return
         
-        # Get free lessons count
-        free_total = supabase.table("lessons").select("id", count="exact").eq("is_free", True).execute()
-        free_count = free_total.count if hasattr(free_total, 'count') else 0
+        # Get user progress
+        progress_result = supabase.table("user_progress").select("lesson_id,is_completed").eq("telegram_id", user_id).eq("is_completed", True).execute()
         
-        message = (
-            f"📊 *پیشرفت شما:*\n\n"
-            f"✅ درس‌های تکمیل شده: {completed_count}\n"
-            f"📚 کل درس‌ها: {total_count}\n"
-            f"🆓 درس‌های رایگان: {free_count}\n\n"
+        completed_count = len(progress_result.data) if progress_result.data else 0
+        
+        progress_text = (
+            f"📊 **پیشرفت شما:**\n\n"
+            f"✅ درس‌های تکمیل شده: {completed_count} از {TOTAL_LESSONS}\n"
+            f"📈 درصد پیشرفت: {int((completed_count / TOTAL_LESSONS) * 100)}%\n\n"
+            f"از دستور /lessons برای مشاهده فهرست درس‌ها استفاده کنید."
         )
         
-        if completed_count > 0:
-            percentage = (completed_count / total_count * 100) if total_count > 0 else 0
-            message += f"📈 پیشرفت: {percentage:.1f}%"
-        
-        await update.message.reply_text(message, parse_mode='Markdown')
+        await update.message.reply_text(progress_text, parse_mode='Markdown')
         
     except Exception as e:
-        logger.error(f"Error in progress command: {e}")
-        await update.message.reply_text("❌ خطا در دریافت پیشرفت.")
+        logger.error(f"Error in progress_command: {e}")
+        await update.message.reply_text("❌ خطا در نمایش پیشرفت.")
 
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Cancel the conversation"""
-    await update.message.reply_text(
-        "❌ عملیات لغو شد. برای شروع مجدد از /start استفاده کنید.",
-        reply_markup=None
-    )
-    context.user_data.clear()
-    return ConversationHandler.END
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """Handle errors"""
+    logger.error(f"Exception while handling an update: {context.error}", exc_info=context.error)
+    if update and update.effective_message:
+        try:
+            await update.effective_message.reply_text("❌ متأسفانه خطایی رخ داد. لطفاً دوباره تلاش کنید.")
+        except:
+            pass
 
+async def test_bot_connection(token: str, max_retries: int = 3) -> bool:
+    """Test bot connection to Telegram API"""
+    for attempt in range(max_retries):
+        try:
+            logger.info(f"Testing connection to Telegram API (attempt {attempt + 1}/{max_retries})...")
+            bot = Bot(token=token)
+            await bot.initialize()
+            me = await bot.get_me()
+            await bot.shutdown()
+            logger.info(f"✅ Connection successful! Bot: @{me.username}")
+            return True
+        except Exception as e:
+            error_msg = str(e)
+            if attempt < max_retries - 1:
+                wait_time = (attempt + 1) * 2
+                logger.warning(f"⚠️  Connection failed (attempt {attempt + 1}/{max_retries}): {error_msg[:100]}")
+                logger.info(f"⏳ Retrying in {wait_time} seconds...")
+                await asyncio.sleep(wait_time)
+            else:
+                logger.error(f"❌ Failed to connect after {max_retries} attempts")
+                logger.error(f"Error: {error_msg}")
+                return False
+    return False
 
 def main() -> None:
     """Start the bot"""
-    if not BOT_TOKEN or not SUPABASE_URL or not SUPABASE_KEY:
-        logger.error("Missing required environment variables!")
+    if not BOT_TOKEN:
+        logger.error("❌ BOT_TOKEN not found in environment variables!")
+        logger.error("Please check your .env file and ensure BOT_TOKEN is set.")
         return
     
-    # Create application
-    application = Application.builder().token(BOT_TOKEN).build()
+    logger.info("=" * 60)
+    logger.info("🤖 Starting Telegram Bot...")
+    logger.info("=" * 60)
     
-    # Conversation handler for registration flow
+    # Test connection first
+    try:
+        connection_ok = asyncio.run(test_bot_connection(BOT_TOKEN))
+        if not connection_ok:
+            logger.error("\n" + "=" * 60)
+            logger.error("❌ Cannot connect to Telegram API!")
+            logger.error("=" * 60)
+            logger.error("\n💡 Troubleshooting:")
+            logger.error("   1. Check your internet connection")
+            logger.error("   2. Verify BOT_TOKEN is correct in .env file")
+            logger.error("   3. If in Iran, use VPN/proxy to access Telegram")
+            logger.error("   4. Check firewall/proxy settings")
+            logger.error("   5. Try accessing https://api.telegram.org in browser")
+            logger.error("\n⚠️  Bot will not start without connection.")
+            return
+    except Exception as e:
+        logger.error(f"❌ Error testing connection: {e}")
+        return
+    
+    try:
+        logger.info("📱 Creating bot application...")
+        application = Application.builder().token(BOT_TOKEN).build()
+        logger.info("✅ Application created successfully")
+    except Exception as e:
+        logger.error(f"❌ Error creating application: {e}")
+        return
+    
+    # Conversation handler for registration
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
-            SELECTING_PLAN: [
-                CallbackQueryHandler(on_plan_selected, pattern="^plan_")
-            ],
-            SELECTING_PAYMENT: [
-                CallbackQueryHandler(on_payment_method, pattern="^pay_")
-            ],
-            WAITING_RECEIPT: [
-                MessageHandler(filters.PHOTO, handle_receipt_photo),
-                CommandHandler("cancel", cancel)
-            ],
             WAITING_NAME: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_name),
                 CommandHandler("cancel", cancel)
             ],
             WAITING_PHONE: [
-                MessageHandler(filters.TEXT | filters.CONTACT, handle_phone),
+                MessageHandler(filters.CONTACT, handle_phone),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_phone),
+                CommandHandler("cancel", cancel)
+            ],
+            WAITING_PYTHON_STATUS: [
+                CallbackQueryHandler(handle_python_status, pattern="^python_"),
                 CommandHandler("cancel", cancel)
             ],
         },
-        fallbacks=[CommandHandler("start", start), CommandHandler("cancel", cancel)]
+        fallbacks=[CommandHandler("start", start), CommandHandler("cancel", cancel)],
+        per_chat=True,
+        per_user=True
     )
     
     # Add handlers
+    logger.info("📝 Registering handlers...")
     application.add_handler(conv_handler)
-    application.add_handler(CallbackQueryHandler(on_admin_decision, pattern="^(approve|reject)_"))
-    application.add_handler(CommandHandler("submissions", submissions, filters=filters.User(user_id=ADMIN_IDS)))
-    
-    # Learning path handlers
     application.add_handler(CommandHandler("lessons", lessons_command))
-    application.add_handler(CommandHandler("next", next_lesson_command))
     application.add_handler(CommandHandler("progress", progress_command))
+    application.add_handler(CallbackQueryHandler(handle_lesson_selection, pattern="^lesson_"))
+    application.add_handler(CallbackQueryHandler(handle_lesson_selection, pattern="^lessons_menu"))
+    application.add_handler(CallbackQueryHandler(handle_lesson_selection, pattern="^main_menu"))
+    application.add_handler(CallbackQueryHandler(handle_exam_answer_callback, pattern="^(exam_|start_exam_)"))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_exam_answer))
+    application.add_error_handler(error_handler)
     
-    # Start bot
-    logger.info("Bot started!")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
-
+    logger.info("✅ All handlers registered")
+    logger.info("=" * 60)
+    logger.info("🚀 Bot is ready! Starting polling...")
+    logger.info("=" * 60)
+    
+    try:
+        application.run_polling(
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True,
+            close_loop=False
+        )
+    except KeyboardInterrupt:
+        logger.info("\n⚠️  Bot stopped by user")
+    except Exception as e:
+        logger.error(f"❌ Fatal error: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
 
 if __name__ == '__main__':
     main()
