@@ -46,21 +46,41 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Configuration
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "").strip()
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "").strip()
+
+# Validate environment variables
+missing_vars = []
+if not BOT_TOKEN:
+    missing_vars.append("BOT_TOKEN")
+if not SUPABASE_URL:
+    missing_vars.append("SUPABASE_URL")
+if not SUPABASE_KEY:
+    missing_vars.append("SUPABASE_KEY")
+
+if missing_vars:
+    logger.error(f"❌ Missing required environment variables: {', '.join(missing_vars)}")
+    logger.error("Please set these variables in Railway dashboard:")
+    for var in missing_vars:
+        logger.error(f"  - {var}")
+    if not BOT_TOKEN:
+        logger.error("⚠️  Bot cannot start without BOT_TOKEN!")
+        exit(1)
 
 # Initialize Supabase client
 supabase: Optional[Client] = None
 if SUPABASE_URL and SUPABASE_KEY:
     try:
         supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-        logger.info("Supabase client initialized successfully")
+        logger.info("✅ Supabase client initialized successfully")
     except Exception as e:
-        logger.error(f"Error initializing Supabase client: {e}")
+        logger.error(f"❌ Error initializing Supabase client: {e}")
+        logger.error("Bot will continue but database features will be disabled")
         supabase = None
 else:
-    logger.warning("Supabase credentials not found, client not initialized")
+    logger.warning("⚠️  Supabase credentials not found, client not initialized")
+    logger.warning("Bot will continue but database features will be disabled")
 
 # Admin IDs
 ADMIN_IDS_STR = os.environ.get("ADMIN_IDS", "")
