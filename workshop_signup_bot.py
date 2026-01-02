@@ -18,6 +18,7 @@ import jdatetime
 from dotenv import load_dotenv
 from supabase import create_client, Client
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, Bot
+from telegram.error import Conflict, TimedOut, NetworkError
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -991,7 +992,27 @@ async def progress_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     """Handle errors"""
-    logger.error(f"Exception while handling an update: {context.error}", exc_info=context.error)
+    error = context.error
+    logger.error(f"Exception while handling an update: {error}")
+    
+    # Handle Conflict errors gracefully (multiple instances)
+    if isinstance(error, Conflict):
+        logger.warning("⚠️  Conflict detected - another bot instance may be running")
+        logger.warning("💡 This is usually temporary and will resolve automatically")
+        return  # Don't send error message to user for conflicts
+    
+    # Handle network errors gracefully
+    if isinstance(error, (NetworkError, TimedOut)):
+        logger.warning(f"⚠️  Network error: {error}")
+        logger.warning("💡 Retrying automatically...")
+        return
+    
+    # Log full traceback for other errors
+    if error:
+        import traceback
+        logger.error(traceback.format_exc())
+    
+    # Send error message to user for other errors
     if update and update.effective_message:
         try:
             await update.effective_message.reply_text("❌ متأسفانه خطایی رخ داد. لطفاً دوباره تلاش کنید.")
@@ -1100,6 +1121,18 @@ def main() -> None:
     logger.info("🚀 Bot is ready! Starting polling...")
     logger.info("=" * 60)
     
+    # Ensure webhook is deleted before starting polling
+    try:
+        logger.info("🔧 Deleting any existing webhook...")
+        bot = application.bot
+        asyncio.run(bot.delete_webhook(drop_pending_updates=True))
+        logger.info("✅ Webhook deleted successfully")
+    except Conflict as e:
+        logger.warning(f"⚠️  Conflict detected (another instance may be running): {e}")
+        logger.warning("💡 This usually resolves automatically. Continuing...")
+    except Exception as e:
+        logger.warning(f"⚠️  Warning while deleting webhook: {e}")
+    
     try:
         application.run_polling(
             allowed_updates=Update.ALL_TYPES,
@@ -1108,6 +1141,12 @@ def main() -> None:
         )
     except KeyboardInterrupt:
         logger.info("\n⚠️  Bot stopped by user")
+    except Conflict as e:
+        logger.error(f"❌ Conflict error: {e}")
+        logger.error("💡 Make sure only one bot instance is running!")
+        logger.error("   - Check Railway for duplicate deployments")
+        logger.error("   - Stop any local instances")
+        logger.error("   - Wait a few seconds and restart")
     except Exception as e:
         logger.error(f"❌ Fatal error: {e}")
         import traceback
