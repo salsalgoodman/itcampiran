@@ -312,8 +312,10 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 def check_lesson_exam_passed(telegram_id: int, lesson_number: int) -> bool:
     """Check if user passed exam for a lesson"""
+    # If no database, allow access to all lessons
     if not supabase:
-        return False
+        logger.info(f"⚠️  No database connection - allowing access to lesson {lesson_number}")
+        return True
     
     try:
         # Get lesson ID
