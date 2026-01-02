@@ -416,18 +416,37 @@ async def show_lessons_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.effective_message.reply_text("❌ خطا در نمایش منوی درس‌ها.")
 
 def get_lesson_data(lesson_number: int):
-    """Get lesson data from database"""
-    if not supabase:
-        return None
+    """Get lesson data from database or fallback to local content"""
+    # Try database first
+    if supabase:
+        try:
+            result = supabase.table("lessons").select("*").eq("lesson_number", lesson_number).execute()
+            if result.data and len(result.data) > 0:
+                logger.info(f"✅ Lesson {lesson_number} loaded from database")
+                return result.data[0]
+        except Exception as e:
+            logger.warning(f"⚠️  Error getting lesson {lesson_number} from database: {e}")
+            logger.info(f"💡 Falling back to local lesson content...")
     
+    # Fallback to local content
     try:
-        result = supabase.table("lessons").select("*").eq("lesson_number", lesson_number).execute()
-        if result.data:
-            return result.data[0]
-        return None
+        lesson_data = get_lesson_by_number(lesson_number)
+        if lesson_data:
+            logger.info(f"✅ Lesson {lesson_number} loaded from local content")
+            # Convert local format to database format
+            return {
+                "id": lesson_number,
+                "lesson_number": lesson_number,
+                "title": lesson_data.get("title", f"درس {lesson_number}"),
+                "content": json.dumps(lesson_data.get("content", []), ensure_ascii=False),
+                "code_examples": json.dumps(lesson_data.get("code_examples", []), ensure_ascii=False),
+                "expected_outputs": json.dumps(lesson_data.get("expected_outputs", []), ensure_ascii=False),
+                "is_free": True
+            }
     except Exception as e:
-        logger.error(f"Error getting lesson data: {e}")
-        return None
+        logger.error(f"❌ Error getting lesson {lesson_number} from local content: {e}")
+    
+    return None
 
 async def send_lesson(update_or_bot, chat_id: int, lesson_number: int, context=None):
     """Send a complete lesson to user"""
@@ -474,9 +493,26 @@ async def send_lesson(update_or_bot, chat_id: int, lesson_number: int, context=N
                 lesson_text += "\n" + "─" * 30 + "\n\n"
             lesson_text += section
         
-        # Parse code examples
-        code_examples = json.loads(lesson_data.get("code_examples", "[]"))
-        expected_outputs = json.loads(lesson_data.get("expected_outputs", "[]"))
+        # Parse code examples - handle both string and list formats
+        code_examples_raw = lesson_data.get("code_examples", "[]")
+        if isinstance(code_examples_raw, str):
+            try:
+                code_examples = json.loads(code_examples_raw)
+            except json.JSONDecodeError:
+                logger.error(f"Error parsing code_examples JSON for lesson {lesson_number}")
+                code_examples = []
+        else:
+            code_examples = code_examples_raw if isinstance(code_examples_raw, list) else []
+        
+        expected_outputs_raw = lesson_data.get("expected_outputs", "[]")
+        if isinstance(expected_outputs_raw, str):
+            try:
+                expected_outputs = json.loads(expected_outputs_raw)
+            except json.JSONDecodeError:
+                logger.error(f"Error parsing expected_outputs JSON for lesson {lesson_number}")
+                expected_outputs = []
+        else:
+            expected_outputs = expected_outputs_raw if isinstance(expected_outputs_raw, list) else []
         
         if code_examples:
             lesson_text += "\n\n" + "─" * 30 + "\n\n"
