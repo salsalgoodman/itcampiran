@@ -1121,18 +1121,7 @@ def main() -> None:
     logger.info("🚀 Bot is ready! Starting polling...")
     logger.info("=" * 60)
     
-    # Ensure webhook is deleted before starting polling
-    try:
-        logger.info("🔧 Deleting any existing webhook...")
-        bot = application.bot
-        asyncio.run(bot.delete_webhook(drop_pending_updates=True))
-        logger.info("✅ Webhook deleted successfully")
-    except Conflict as e:
-        logger.warning(f"⚠️  Conflict detected (another instance may be running): {e}")
-        logger.warning("💡 This usually resolves automatically. Continuing...")
-    except Exception as e:
-        logger.warning(f"⚠️  Warning while deleting webhook: {e}")
-    
+    # run_polling automatically deletes webhook when drop_pending_updates=True
     try:
         application.run_polling(
             allowed_updates=Update.ALL_TYPES,
