@@ -436,17 +436,38 @@ def get_lesson_data(lesson_number: int):
         if lesson_data:
             logger.info(f"✅ Lesson {lesson_number} loaded from local content")
             # Convert local format to database format
+            # Note: content in lessons_content_new.py is already JSON string, so use it directly
+            content_raw = lesson_data.get("content", "[]")
+            if isinstance(content_raw, str):
+                # Already JSON string, use as is
+                content = content_raw
+            else:
+                # List, convert to JSON string
+                content = json.dumps(content_raw, ensure_ascii=False)
+            
+            code_examples_raw = lesson_data.get("code_examples", "[]")
+            if isinstance(code_examples_raw, str):
+                code_examples = code_examples_raw
+            else:
+                code_examples = json.dumps(code_examples_raw, ensure_ascii=False)
+            
+            expected_outputs_raw = lesson_data.get("expected_outputs", "[]")
+            if isinstance(expected_outputs_raw, str):
+                expected_outputs = expected_outputs_raw
+            else:
+                expected_outputs = json.dumps(expected_outputs_raw, ensure_ascii=False)
+            
             return {
                 "id": lesson_number,
                 "lesson_number": lesson_number,
                 "title": lesson_data.get("title", f"درس {lesson_number}"),
-                "content": json.dumps(lesson_data.get("content", []), ensure_ascii=False),
-                "code_examples": json.dumps(lesson_data.get("code_examples", []), ensure_ascii=False),
-                "expected_outputs": json.dumps(lesson_data.get("expected_outputs", []), ensure_ascii=False),
+                "content": content,
+                "code_examples": code_examples,
+                "expected_outputs": expected_outputs,
                 "is_free": True
             }
     except Exception as e:
-        logger.error(f"❌ Error getting lesson {lesson_number} from local content: {e}")
+        logger.error(f"❌ Error getting lesson {lesson_number} from local content: {e}", exc_info=True)
     
     return None
 
@@ -483,8 +504,22 @@ async def send_lesson(update_or_bot, chat_id: int, lesson_number: int, context=N
                     await update_or_bot.send_message(chat_id=chat_id, text=error_msg, parse_mode='Markdown')
                 return
         
-        # Parse content
-        content = json.loads(lesson_data.get("content", "[]"))
+        # Parse content - handle both string and list formats
+        content_raw = lesson_data.get("content", "[]")
+        if isinstance(content_raw, str):
+            try:
+                content = json.loads(content_raw)
+            except json.JSONDecodeError as e:
+                logger.error(f"Error parsing content JSON for lesson {lesson_number}: {e}")
+                logger.error(f"Content: {content_raw[:200]}...")
+                content = [content_raw] if content_raw else []
+        else:
+            content = content_raw if isinstance(content_raw, list) else []
+        
+        if not content:
+            logger.warning(f"⚠️  No content found for lesson {lesson_number}")
+            content = [f"درس {lesson_number} در حال آماده‌سازی است..."]
+        
         title = lesson_data.get("title", f"درس {lesson_number}")
         
         # Send lesson content
