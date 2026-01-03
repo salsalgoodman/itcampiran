@@ -574,14 +574,21 @@ async def send_lesson(update_or_bot, chat_id: int, lesson_number: int, context=N
         
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        # Send lesson
+        # Send lesson - always send as new message, never edit
         sent_message = None
+        bot = context.bot if hasattr(context, 'bot') and context else None
+        
         if isinstance(update_or_bot, Update):
             sent_message = await update_or_bot.message.reply_text(lesson_text, reply_markup=reply_markup, parse_mode='Markdown')
-        elif hasattr(update_or_bot, 'edit_message_text'):
-            sent_message = await update_or_bot.edit_message_text(lesson_text, reply_markup=reply_markup, parse_mode='Markdown')
-        else:
+        elif bot:
+            # Use bot from context to send new message
+            sent_message = await bot.send_message(chat_id=chat_id, text=lesson_text, reply_markup=reply_markup, parse_mode='Markdown')
+        elif hasattr(update_or_bot, 'send_message'):
+            # update_or_bot is a Bot instance
             sent_message = await update_or_bot.send_message(chat_id=chat_id, text=lesson_text, reply_markup=reply_markup, parse_mode='Markdown')
+        else:
+            logger.error(f"Cannot send lesson - no valid bot instance available")
+            return
         
         # Store lesson message ID for later reference
         if sent_message and hasattr(sent_message, 'message_id'):
