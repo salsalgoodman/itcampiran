@@ -73,23 +73,43 @@ for i, lesson in enumerate(lessons, 1):
         
         # Insert questions
         questions = lesson.get("questions", [])
+        question_count = 0
         for q in questions:
+            # Handle options - if it's already a JSON string, use it; otherwise convert
+            options = q.get("options", None)
+            if options is not None:
+                if isinstance(options, str):
+                    # Already a JSON string (from json.dumps in lessons_content_new.py)
+                    options_json = options
+                else:
+                    # Convert list/dict to JSON string
+                    options_json = json.dumps(options, ensure_ascii=False)
+            else:
+                options_json = None
+            
             question_data = {
                 "lesson_id": lesson_id,
                 "question_number": q["question_number"],
                 "question_text": q["question_text"],
                 "question_type": q.get("question_type", "text"),
                 "correct_answer": q["correct_answer"],
-                "options": q.get("options", None),
+                "options": options_json,
                 "explanation": q.get("explanation", None)
             }
             
             try:
+                # Check if question already exists
+                existing = supabase.table("questions").select("id").eq("lesson_id", lesson_id).eq("question_number", q["question_number"]).execute()
+                if existing.data:
+                    print(f"    ⏭️ سوال {q['question_number']} از قبل وجود دارد")
+                    continue
+                
                 supabase.table("questions").insert(question_data).execute()
+                question_count += 1
             except Exception as e:
-                print(f"    ⚠️ خطا در اضافه کردن سوال: {e}")
+                print(f"    ⚠️ خطا در اضافه کردن سوال {q['question_number']}: {e}")
         
-        print(f"  ✅ {len(questions)} سوال اضافه شد")
+        print(f"  ✅ {question_count} سوال جدید اضافه شد (از {len(questions)} سوال)")
         
     except Exception as e:
         print(f"  ❌ خطا در درس {lesson_number}: {e}")
@@ -101,4 +121,5 @@ print(f"\n📊 خلاصه:")
 print(f"  - تعداد درس‌ها: {len(lessons)}")
 print(f"  - همه درس‌ها رایگان هستند")
 print(f"  - آماده استفاده در ربات")
+
 
