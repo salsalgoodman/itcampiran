@@ -479,12 +479,15 @@ async def send_lesson(update_or_bot, chat_id: int, lesson_number: int, context=N
         lesson_data = get_lesson_data(lesson_number)
         if not lesson_data:
             error_msg = "❌ درس یافت نشد."
+            bot = context.bot if hasattr(context, 'bot') and context else None
             if isinstance(update_or_bot, Update):
                 await update_or_bot.message.reply_text(error_msg)
-            elif hasattr(update_or_bot, 'edit_message_text'):
-                await update_or_bot.edit_message_text(error_msg)
-            else:
+            elif bot:
+                await bot.send_message(chat_id=chat_id, text=error_msg)
+            elif hasattr(update_or_bot, 'send_message'):
                 await update_or_bot.send_message(chat_id=chat_id, text=error_msg)
+            else:
+                logger.error("Cannot send error message - no bot instance available")
             return
         
         # Check if previous lesson exam is passed (except for first lesson)
@@ -496,12 +499,15 @@ async def send_lesson(update_or_bot, chat_id: int, lesson_number: int, context=N
                     f"برای دسترسی به درس {lesson_number}، باید آزمون درس {lesson_number - 1} را قبول کنید.\n\n"
                     f"از منوی درس‌ها، درس {lesson_number - 1} را انتخاب کنید و آزمون آن را بدهید."
                 )
+                bot = context.bot if hasattr(context, 'bot') and context else None
                 if isinstance(update_or_bot, Update):
                     await update_or_bot.message.reply_text(error_msg, parse_mode='Markdown')
-                elif hasattr(update_or_bot, 'edit_message_text'):
-                    await update_or_bot.edit_message_text(error_msg, parse_mode='Markdown')
-                else:
+                elif bot:
+                    await bot.send_message(chat_id=chat_id, text=error_msg, parse_mode='Markdown')
+                elif hasattr(update_or_bot, 'send_message'):
                     await update_or_bot.send_message(chat_id=chat_id, text=error_msg, parse_mode='Markdown')
+                else:
+                    logger.error("Cannot send locked lesson message - no bot instance available")
                 return
         
         # Parse content - handle both string and list formats
@@ -626,12 +632,15 @@ async def send_lesson(update_or_bot, chat_id: int, lesson_number: int, context=N
     except Exception as e:
         logger.error(f"Error sending lesson {lesson_number}: {e}", exc_info=True)
         error_msg = f"❌ خطا در ارسال درس.\n\nخطا: {str(e)[:100]}"
+        bot = context.bot if hasattr(context, 'bot') and context else None
         if isinstance(update_or_bot, Update):
             await update_or_bot.message.reply_text(error_msg)
-        elif hasattr(update_or_bot, 'edit_message_text'):
-            await update_or_bot.edit_message_text(error_msg)
-        else:
+        elif bot:
+            await bot.send_message(chat_id=chat_id, text=error_msg)
+        elif hasattr(update_or_bot, 'send_message'):
             await update_or_bot.send_message(chat_id=chat_id, text=error_msg)
+        else:
+            logger.error("Cannot send error message - no bot instance available")
 
 async def start_lesson_exam(update_or_bot, chat_id: int, lesson_id: int, lesson_number: int, context=None):
     """Start exam for a lesson"""
@@ -642,10 +651,13 @@ async def start_lesson_exam(update_or_bot, chat_id: int, lesson_id: int, lesson_
         if not result.data:
             logger.warning(f"No questions found for lesson {lesson_number}")
             error_msg = "❌ سوالی برای این درس یافت نشد."
-            if hasattr(update_or_bot, 'edit_message_text'):
-                await update_or_bot.edit_message_text(error_msg)
+            bot = context.bot if hasattr(context, 'bot') and context else None
+            if bot:
+                await bot.send_message(chat_id=chat_id, text=error_msg)
             elif hasattr(update_or_bot, 'send_message'):
                 await update_or_bot.send_message(chat_id=chat_id, text=error_msg)
+            else:
+                logger.error("Cannot send error message - no bot instance available")
             return
         
         questions = result.data
@@ -680,10 +692,13 @@ async def start_lesson_exam(update_or_bot, chat_id: int, lesson_id: int, lesson_
     except Exception as e:
         logger.error(f"Error starting exam: {e}", exc_info=True)
         error_msg = f"❌ خطا در شروع آزمون: {str(e)[:100]}"
-        if hasattr(update_or_bot, 'edit_message_text'):
-            await update_or_bot.edit_message_text(error_msg)
+        bot = context.bot if hasattr(context, 'bot') and context else None
+        if bot:
+            await bot.send_message(chat_id=chat_id, text=error_msg)
         elif hasattr(update_or_bot, 'send_message'):
             await update_or_bot.send_message(chat_id=chat_id, text=error_msg)
+        else:
+            logger.error("Cannot send error message - no bot instance available")
 
 async def send_exam_question(update_or_bot, chat_id: int, context, question_index: int):
     """Send an exam question"""
@@ -968,11 +983,16 @@ async def finish_exam(update_or_bot, context):
         
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        # Send result
-        if hasattr(update_or_bot, 'edit_message_text'):
-            await update_or_bot.edit_message_text(result_text, reply_markup=reply_markup, parse_mode='Markdown')
+        # Send result - always send as new message
+        bot = context.bot if hasattr(context, 'bot') and context else None
+        if isinstance(update_or_bot, Update):
+            await update_or_bot.message.reply_text(result_text, reply_markup=reply_markup, parse_mode='Markdown')
+        elif bot:
+            await bot.send_message(chat_id=user_id, text=result_text, reply_markup=reply_markup, parse_mode='Markdown')
         elif hasattr(update_or_bot, 'send_message'):
             await update_or_bot.send_message(chat_id=user_id, text=result_text, reply_markup=reply_markup, parse_mode='Markdown')
+        else:
+            logger.error("Cannot send exam result - no bot instance available")
         
         # Auto-send next lesson if passed
         if passed and lesson_number < TOTAL_LESSONS:
@@ -1014,7 +1034,8 @@ async def handle_lesson_selection(update: Update, context: ContextTypes.DEFAULT_
         # Check if lesson exists
         lesson_data = get_lesson_data(lesson_number)
         if not lesson_data:
-            await query.edit_message_text("❌ درس یافت نشد.")
+            await query.answer("❌ درس یافت نشد.", show_alert=True)
+            await context.bot.send_message(chat_id=user_id, text="❌ درس یافت نشد.")
             return
         
         # Send lesson - pass context to send_lesson
@@ -1026,8 +1047,12 @@ async def handle_lesson_selection(update: Update, context: ContextTypes.DEFAULT_
         
     except Exception as e:
         logger.error(f"Error handling lesson selection: {e}", exc_info=True)
-        if update.callback_query:
-            await update.callback_query.edit_message_text("❌ خطا در بارگذاری درس.")
+        bot = context.bot if hasattr(context, 'bot') and context else None
+        error_msg = "❌ خطا در بارگذاری درس."
+        if bot:
+            await bot.send_message(chat_id=user_id, text=error_msg)
+        elif update.callback_query:
+            await update.callback_query.answer("❌ خطا در بارگذاری درس.", show_alert=True)
 
 async def lessons_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /lessons command"""
