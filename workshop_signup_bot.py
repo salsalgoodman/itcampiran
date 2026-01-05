@@ -84,14 +84,21 @@ else:
     logger.warning("Bot will continue but database features will be disabled")
 
 # Admin IDs
-ADMIN_IDS_STR = os.environ.get("ADMIN_IDS", "")
+ADMIN_IDS_STR = os.environ.get("ADMIN_IDS", "5813277691")
 ADMIN_IDS = [int(admin_id.strip()) for admin_id in ADMIN_IDS_STR.split(",") if admin_id.strip()]
 
-# Total lessons: 15 (all free)
+# Payment configuration
+PAYMENT_AMOUNT = 100000  # 100 هزار تومان
+PAYMENT_CARD_NUMBER = "6063731112299749"
+PAYMENT_CARD_OWNER = "سیرجان نژاد"
+FREE_LESSONS_COUNT = 2  # درس 1 و 2 رایگان هستند
+
+# Total lessons: 15
 TOTAL_LESSONS = 15
 
 # Conversation states
 WAITING_NAME, WAITING_PHONE, WAITING_PYTHON_STATUS = range(3)
+WAITING_RECEIPT = 4  # Waiting for payment receipt
 WAITING_EXAM_ANSWER = 10  # For answering exam questions
 
 # Admin restriction decorator
@@ -310,6 +317,20 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.clear()
     return ConversationHandler.END
 
+def check_user_paid(telegram_id: int) -> bool:
+    """Check if user has paid for lessons"""
+    if not supabase:
+        # If database not available, allow access (fallback)
+        return True
+    try:
+        result = supabase.table("users").select("has_paid_for_lessons").eq("telegram_id", telegram_id).execute()
+        if result.data and len(result.data) > 0:
+            return result.data[0].get("has_paid_for_lessons", False)
+        return False
+    except Exception as e:
+        logger.error(f"Error checking payment status: {e}")
+        return False
+
 def check_lesson_exam_passed(telegram_id: int, lesson_number: int) -> bool:
     """Check if user passed exam for a lesson"""
     # If no database, allow access to all lessons
@@ -369,16 +390,22 @@ async def show_lessons_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 lesson_num = lesson["lesson_number"]
                 title = lesson.get("title", "")
                 
+                # Check payment status
+                requires_payment = lesson_num > FREE_LESSONS_COUNT
+                has_paid = check_user_paid(user_id)
+                
                 # Determine status icon
                 if lesson_num == 1:
                     status_icon = "🆓"  # First lesson is always free
+                elif requires_payment and not has_paid:
+                    status_icon = "💰"  # Requires payment
                 else:
                     # Check if previous lesson exam passed
                     prev_passed = check_lesson_exam_passed(user_id, lesson_num - 1)
                     if not prev_passed:
                         status_icon = "🔒"  # Locked
                     else:
-                        status_icon = "🆓"  # All lessons are free now
+                        status_icon = "📖"  # Available
                 
                 button_text = f"{status_icon} درس {lesson_num}"
                 if title and len(title) > 15:
@@ -400,12 +427,22 @@ async def show_lessons_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         reply_markup = InlineKeyboardMarkup(keyboard)
         
+        # Check payment status
+        has_paid = check_user_paid(user_id)
+        
         menu_text = (
             f"📚 **فهرست درس‌ها** ({TOTAL_LESSONS} درس)\n\n"
-            "🆓 همه درس‌ها رایگان هستند!\n"
-            "🔒 درس‌های قفل شده نیاز به قبولی آزمون قبلی دارند.\n\n"
-            "یک درس را انتخاب کنید:"
         )
+        
+        if has_paid:
+            menu_text += "✅ شما دسترسی کامل به همه درس‌ها را دارید!\n\n"
+        else:
+            menu_text += (
+                f"🆓 درس‌های 1-{FREE_LESSONS_COUNT} رایگان هستند\n"
+                f"💰 درس‌های {FREE_LESSONS_COUNT + 1}+ نیاز به پرداخت {PAYMENT_AMOUNT:,} تومان دارند\n\n"
+            )
+        
+        menu_text += "🔒 درس‌های قفل شده نیاز به قبولی آزمون قبلی دارند.\n\nیک درس را انتخاب کنید:"
         
         if hasattr(update, 'callback_query') and update.callback_query:
             await update.callback_query.edit_message_text(menu_text, reply_markup=reply_markup, parse_mode='Markdown')
@@ -488,6 +525,15 @@ async def send_lesson(update_or_bot, chat_id: int, lesson_number: int, context=N
                 await update_or_bot.send_message(chat_id=chat_id, text=error_msg)
             else:
                 logger.error("Cannot send error message - no bot instance available")
+            return
+        
+        # Check if lesson requires payment
+        requires_payment = lesson_number > FREE_LESSONS_COUNT
+        has_paid = check_user_paid(chat_id)
+        
+        if requires_payment and not has_paid:
+            # Request payment
+            await request_payment(update_or_bot, chat_id, context)
             return
         
         # Check if previous lesson exam is passed (except for first lesson)
@@ -1095,6 +1141,220 @@ async def progress_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error in progress_command: {e}")
         await update.message.reply_text("❌ خطا در نمایش پیشرفت.")
 
+async def request_payment(update_or_bot, chat_id: int, context=None):
+    """Request payment from user"""
+    payment_text = (
+        f"💰 **پرداخت برای دسترسی به درس‌ها**\n\n"
+        f"برای دسترسی به درس‌های {FREE_LESSONS_COUNT + 1} به بعد، باید مبلغ {PAYMENT_AMOUNT:,} تومان پرداخت کنید.\n\n"
+        f"📋 **اطلاعات کارت:**\n"
+        f"شماره کارت: `{PAYMENT_CARD_NUMBER}`\n"
+        f"به نام: {PAYMENT_CARD_OWNER}\n\n"
+        f"💡 **مراحل پرداخت:**\n"
+        f"1️⃣ مبلغ {PAYMENT_AMOUNT:,} تومان را به کارت بالا واریز کنید\n"
+        f"2️⃣ عکس فیش واریزی را برای ما ارسال کنید\n"
+        f"3️⃣ بعد از تایید ادمین، دسترسی شما فعال می‌شود\n\n"
+        f"لطفاً عکس فیش واریزی را ارسال کنید:"
+    )
+    
+    bot = context.bot if hasattr(context, 'bot') and context else None
+    if isinstance(update_or_bot, Update):
+        await update_or_bot.message.reply_text(payment_text, parse_mode='Markdown')
+    elif bot:
+        await bot.send_message(chat_id=chat_id, text=payment_text, parse_mode='Markdown')
+    elif hasattr(update_or_bot, 'send_message'):
+        await update_or_bot.send_message(chat_id=chat_id, text=payment_text, parse_mode='Markdown')
+    
+    # Set conversation state
+    if context:
+        context.user_data['waiting_receipt'] = True
+
+async def handle_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle payment receipt (photo)"""
+    user_id = update.effective_user.id
+    
+    if not update.message.photo:
+        await update.message.reply_text(
+            "❌ لطفاً عکس فیش واریزی را ارسال کنید.\n"
+            "برای لغو، دستور /cancel را بزنید."
+        )
+        return WAITING_RECEIPT
+    
+    # Get the largest photo
+    photo = update.message.photo[-1]
+    file = await context.bot.get_file(photo.file_id)
+    
+    # Download photo
+    photo_bytes = io.BytesIO()
+    await file.download_to_memory(photo_bytes)
+    photo_bytes.seek(0)
+    
+    # Upload to Supabase Storage (if available)
+    receipt_url = None
+    if supabase:
+        try:
+            # Generate unique filename
+            filename = f"receipts/{user_id}_{datetime.now(timezone.utc).timestamp()}.jpg"
+            
+            # Upload to storage
+            storage_response = supabase.storage.from_("receipts").upload(
+                filename,
+                photo_bytes.read(),
+                file_options={"content-type": "image/jpeg"}
+            )
+            
+            # Get public URL
+            receipt_url = supabase.storage.from_("receipts").get_public_url(filename)
+            
+        except Exception as e:
+            logger.error(f"Error uploading receipt to storage: {e}")
+            # Continue without storage URL
+    
+    # Update user record
+    if supabase:
+        try:
+            # Get user info
+            user_result = supabase.table("users").select("name, phone").eq("telegram_id", user_id).execute()
+            user_name = user_result.data[0].get("name", "Unknown") if user_result.data else "Unknown"
+            user_phone = user_result.data[0].get("phone", "Unknown") if user_result.data else "Unknown"
+            
+            # Update user payment status
+            supabase.table("users").update({
+                "payment_method": "card_to_card",
+                "payment_amount": PAYMENT_AMOUNT,
+                "payment_receipt_url": receipt_url,
+                "has_paid_for_lessons": False,  # Pending admin approval
+                "payment_status": "pending"
+            }).eq("telegram_id", user_id).execute()
+            
+            # Notify admins
+            admin_message = (
+                f"🔔 **درخواست تایید پرداخت جدید**\n\n"
+                f"👤 **کاربر:**\n"
+                f"نام: {user_name}\n"
+                f"شماره: {user_phone}\n"
+                f"آی‌دی: `{user_id}`\n\n"
+                f"💰 **مبلغ:** {PAYMENT_AMOUNT:,} تومان\n"
+                f"📋 **روش:** کارت به کارت\n\n"
+            )
+            
+            if receipt_url:
+                admin_message += f"📎 [مشاهده فیش واریزی]({receipt_url})\n\n"
+            
+            admin_message += "لطفاً بررسی کنید و تایید/رد کنید:"
+            
+            keyboard = [
+                [
+                    InlineKeyboardButton("✅ تایید", callback_data=f"approve_payment_{user_id}"),
+                    InlineKeyboardButton("❌ رد", callback_data=f"reject_payment_{user_id}")
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            # Send to all admins
+            for admin_id in ADMIN_IDS:
+                try:
+                    await context.bot.send_message(
+                        chat_id=admin_id,
+                        text=admin_message,
+                        reply_markup=reply_markup,
+                        parse_mode='Markdown'
+                    )
+                except Exception as e:
+                    logger.error(f"Error sending notification to admin {admin_id}: {e}")
+            
+        except Exception as e:
+            logger.error(f"Error updating payment status: {e}")
+    
+    await update.message.reply_text(
+        "✅ فیش واریزی شما دریافت شد!\n\n"
+        "⏳ در حال بررسی توسط ادمین...\n"
+        "بعد از تایید، دسترسی شما به درس‌ها فعال می‌شود.\n\n"
+        "شما می‌توانید از دستور /lessons برای مشاهده فهرست درس‌ها استفاده کنید."
+    )
+    
+    # Clear waiting state
+    if context:
+        context.user_data.pop('waiting_receipt', None)
+    
+    return ConversationHandler.END
+
+async def handle_payment_approval(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle admin approval/rejection of payment"""
+    query = update.callback_query
+    await query.answer()
+    
+    if query.from_user.id not in ADMIN_IDS:
+        await query.answer("❌ شما دسترسی به این عملیات را ندارید.", show_alert=True)
+        return
+    
+    action, user_id_str = query.data.split("_", 2)[1], query.data.split("_", 2)[2]
+    user_id = int(user_id_str)
+    
+    if action == "approve":
+        # Approve payment
+        if supabase:
+            try:
+                supabase.table("users").update({
+                    "has_paid_for_lessons": True,
+                    "payment_status": "approved",
+                    "payment_approved_at": datetime.now(timezone.utc).isoformat()
+                }).eq("telegram_id", user_id).execute()
+                
+                # Notify user
+                try:
+                    await context.bot.send_message(
+                        chat_id=user_id,
+                        text=(
+                            "✅ **پرداخت شما تایید شد!**\n\n"
+                            f"شما حالا دسترسی کامل به همه درس‌ها را دارید.\n\n"
+                            "از دستور /lessons برای مشاهده فهرست درس‌ها استفاده کنید."
+                        ),
+                        parse_mode='Markdown'
+                    )
+                except Exception as e:
+                    logger.error(f"Error notifying user {user_id}: {e}")
+                
+                await query.edit_message_text(
+                    f"✅ پرداخت کاربر {user_id} تایید شد.",
+                    reply_markup=None
+                )
+                
+            except Exception as e:
+                logger.error(f"Error approving payment: {e}")
+                await query.answer("❌ خطا در تایید پرداخت.", show_alert=True)
+    
+    elif action == "reject":
+        # Reject payment
+        if supabase:
+            try:
+                supabase.table("users").update({
+                    "has_paid_for_lessons": False,
+                    "payment_status": "rejected"
+                }).eq("telegram_id", user_id).execute()
+                
+                # Notify user
+                try:
+                    await context.bot.send_message(
+                        chat_id=user_id,
+                        text=(
+                            "❌ **متأسفانه پرداخت شما رد شد.**\n\n"
+                            "لطفاً با پشتیبانی تماس بگیرید.\n"
+                            "یا دوباره فیش واریزی را ارسال کنید."
+                        ),
+                        parse_mode='Markdown'
+                    )
+                except Exception as e:
+                    logger.error(f"Error notifying user {user_id}: {e}")
+                
+                await query.edit_message_text(
+                    f"❌ پرداخت کاربر {user_id} رد شد.",
+                    reply_markup=None
+                )
+                
+            except Exception as e:
+                logger.error(f"Error rejecting payment: {e}")
+                await query.answer("❌ خطا در رد پرداخت.", show_alert=True)
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     """Handle errors"""
     error = context.error
@@ -1203,6 +1463,10 @@ def main() -> None:
                 CallbackQueryHandler(handle_python_status, pattern="^python_"),
                 CommandHandler("cancel", cancel)
             ],
+            WAITING_RECEIPT: [
+                MessageHandler(filters.PHOTO, handle_receipt),
+                CommandHandler("cancel", cancel)
+            ],
         },
         fallbacks=[CommandHandler("start", start), CommandHandler("cancel", cancel)],
         per_chat=True,
@@ -1218,6 +1482,7 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(handle_lesson_selection, pattern="^lessons_menu"))
     application.add_handler(CallbackQueryHandler(handle_lesson_selection, pattern="^main_menu"))
     application.add_handler(CallbackQueryHandler(handle_exam_answer_callback, pattern="^(exam_|start_exam_)"))
+    application.add_handler(CallbackQueryHandler(handle_payment_approval, pattern="^(approve|reject)_payment_"))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_exam_answer))
     application.add_error_handler(error_handler)
     
